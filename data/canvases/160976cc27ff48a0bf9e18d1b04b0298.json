@@ -1,0 +1,135 @@
+{
+  "id": "160976cc27ff48a0bf9e18d1b04b0298",
+  "title": "画布 19:12",
+  "icon": "🧩",
+  "kind": "classic",
+  "owner": "",
+  "color": "",
+  "pinned": false,
+  "project": "default",
+  "created_at": 1785150742990,
+  "updated_at": 1785165104054,
+  "nodes": [
+    {
+      "id": "gen_993d8907cac18_1785150749654",
+      "type": "generator",
+      "x": 704,
+      "y": 297,
+      "apiProvider": "lingjing",
+      "model": "",
+      "ratio": "square",
+      "resolution": "1k",
+      "customRatio": "",
+      "customSize": "",
+      "customRatioWidth": "",
+      "customRatioHeight": "",
+      "customWidth": "",
+      "customHeight": "",
+      "inputs": [
+        "prompt_40de2c112695e8_1785164832592"
+      ],
+      "_apiResolutionUserSet": true,
+      "generatedOutputs": [
+        "/assets/output/online_3d0e35ee11.png"
+      ]
+    },
+    {
+      "id": "prompt_40de2c112695e8_1785164832592",
+      "type": "prompt",
+      "x": 236,
+      "y": 342,
+      "text": "生成一张电商平台的收藏关注优先发货，此项勿拍的规格图片"
+    },
+    {
+      "id": "out_2d0efad09341f8_1785164895582",
+      "type": "output",
+      "x": 1164,
+      "y": 297,
+      "images": [
+        {
+          "url": "/assets/output/online_3d0e35ee11.png",
+          "viewed": true,
+          "runMs": 59865,
+          "run": {
+            "nodeType": "generator",
+            "node": {
+              "id": "gen_993d8907cac18_1785150749654",
+              "type": "generator",
+              "x": 704,
+              "y": 297,
+              "apiProvider": "lingjing",
+              "model": "",
+              "ratio": "square",
+              "resolution": "1k",
+              "customRatio": "",
+              "customSize": "",
+              "customRatioWidth": "",
+              "customRatioHeight": "",
+              "customWidth": "",
+              "customHeight": "",
+              "_apiResolutionUserSet": true
+            },
+            "prompt": "生成一张电商平台的收藏关注优先发货，此项勿拍的规格图片",
+            "refs": [],
+            "request": {
+              "task_id": "",
+              "request_id": "",
+              "provider_id": "lingjing",
+              "backend": "",
+              "prompt_id": "",
+              "workflow_json": "",
+              "seed": ""
+            }
+          }
+        }
+      ],
+      "_pending": []
+    }
+  ],
+  "connections": [
+    {
+      "id": "c_c086983c176c48_1785164888981",
+      "from": "prompt_40de2c112695e8_1785164832592",
+      "to": "gen_993d8907cac18_1785150749654"
+    },
+    {
+      "id": "c_112a9cd6fe8428_1785164895582",
+      "from": "gen_993d8907cac18_1785150749654",
+      "to": "out_2d0efad09341f8_1785164895582"
+    }
+  ],
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "scale": 1
+  },
+  "board_x": 759.0,
+  "board_y": 427.0,
+  "logs": [
+    {
+      "id": "log_df9ab0364f7a8_1785164956492",
+      "createdAt": 1785164956492,
+      "status": "success",
+      "platform": "灵境API",
+      "nodeType": "generator",
+      "model": "API Image",
+      "request": {
+        "task_id": "",
+        "request_id": "",
+        "provider_id": "lingjing",
+        "backend": "",
+        "prompt_id": "",
+        "workflow_json": "",
+        "seed": ""
+      },
+      "prompt": "生成一张电商平台的收藏关注优先发货，此项勿拍的规格图片",
+      "outputs": [
+        "/assets/output/online_3d0e35ee11.png"
+      ],
+      "refs": [],
+      "runMs": 59865,
+      "error": ""
+    }
+  ],
+  "settings": {}
+}

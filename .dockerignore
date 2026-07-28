@@ -1,0 +1,16 @@
+.git
+.gitignore
+Infinite-Canvas-main.zip
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.sqlite3
+output
+assets/uploads
+assets/output
+assets/input
+node_modules
+.DS_Store
+Thumbs.db

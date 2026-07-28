@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.log
+run.log
+server-start.out.log
+server-start.err.log
+*.zip
+_share_*/
+.node_modules/
+.DS_Store
+Thumbs.db
