@@ -1,11 +1,15 @@
-{
-  "project_name": "Infinite Canvas",
-  "home_url": "/static/project-home.html",
-  "version_url": "",
-  "update_notes_url": "",
-  "tree_url": "",
-  "mirror_home_url": "",
-  "mirror_version_url": "",
-  "mirror_update_notes_url": "",
-  "mirror_tree_url": ""
+﻿{
+    "project_name":  "小七AI画布",
+    "home_url":  "/static/project-home.html",
+    "version_url":  "https://raw.githubusercontent.com/cqiqi271/xiaoqi-ai-canvas/main/VERSION",
+    "update_notes_url":  "https://raw.githubusercontent.com/cqiqi271/xiaoqi-ai-canvas/main/static/update-notes.json",
+    "tree_url":  "https://api.github.com/repos/cqiqi271/xiaoqi-ai-canvas/git/trees/main?recursive=1",
+    "raw_root_url":  "https://raw.githubusercontent.com/cqiqi271/xiaoqi-ai-canvas/main",
+    "repo_url":  "https://github.com/cqiqi271/xiaoqi-ai-canvas",
+    "mirror_home_url":  "",
+    "mirror_version_url":  "",
+    "mirror_update_notes_url":  "",
+    "mirror_tree_url":  "",
+    "mirror_raw_root_url":  "",
+    "mirror_repo_url":  ""
 }

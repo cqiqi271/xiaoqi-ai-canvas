@@ -5,6 +5,14 @@ run.log
 server-start.out.log
 server-start.err.log
 *.zip
+API/.env
+data/
+assets/input/
+assets/output/
+assets/uploads/
+output/
+history.json
+static/js/i18n(1)/
 _share_*/
 .node_modules/
 .DS_Store

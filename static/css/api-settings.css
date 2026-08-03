@@ -1,4 +1,4 @@
-﻿:root { --bg:#f7f8fa; --panel:#fff; --soft:#f1f4f8; --line:#e8ecf2; --line-strong:#dbe1ea; --text:#0f172a; --muted:#64748b; --faint:#94a3b8; --accent:#0f172a; }
+:root { --bg:#f7f8fa; --panel:#fff; --soft:#f1f4f8; --line:#e8ecf2; --line-strong:#dbe1ea; --text:#0f172a; --muted:#64748b; --faint:#94a3b8; --accent:#0f172a; }
 body.studio-theme-dark, html.studio-theme-dark body { --bg:#0e1014; --panel:#1c1e26; --soft:#272a33; --line:#323540; --line-strong:#3f424d; --text:#e8e8ea; --muted:#a4adbf; --faint:#7a8497; --accent:#f5f6f8; }
 * { box-sizing:border-box; }
 html { min-height:100%; overflow-y:auto; overscroll-behavior:auto; }
@@ -376,21 +376,17 @@ body.show-codex .api-base-url-field,
 body.show-codex .api-key-field,
 body.show-gemini-cli .api-base-url-field,
 body.show-gemini-cli .api-key-field { display:none !important; }
-.jimeng-cli-panel { grid-column:1/-1; display:none; flex-direction:column; gap:12px; margin-top:2px; padding:16px; border:1px solid var(--line); border-radius:16px; background:linear-gradient(180deg, rgba(255,255,255,.02), rgba(255,255,255,0)), var(--soft); box-shadow:0 14px 28px rgba(0,0,0,.16); }
+.jimeng-cli-panel { grid-column:1/-1; display:none; flex-direction:column; gap:12px; margin-top:2px; padding:14px; border:1px solid var(--line); border-radius:14px; background:var(--soft); }
 body.show-jimeng .jimeng-cli-panel:not([hidden]) { display:flex; }
 body.show-codex .jimeng-cli-panel:not([hidden]) { display:flex; }
 body.show-gemini-cli .jimeng-cli-panel:not([hidden]) { display:flex; }
-.jimeng-cli-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; padding-bottom:2px; }
+.jimeng-cli-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
 .jimeng-status-pill { height:26px; padding:0 10px; border-radius:8px; border:1px solid var(--line-strong); display:inline-flex; align-items:center; color:var(--muted); background:var(--panel); font-size:11px; font-weight:900; white-space:nowrap; }
 .jimeng-status-pill.ok { color:#15803d; border-color:#86efac; background:#f0fdf4; }
 .jimeng-status-pill.bad { color:#b45309; border-color:#fcd34d; background:#fffbeb; }
 .jimeng-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
-.jimeng-account-note { padding:10px 12px; border:1px solid var(--line); border-radius:12px; background:var(--panel); color:var(--muted); font-size:11.5px; font-weight:700; line-height:1.55; }
-.jimeng-verify-card { display:flex; flex-direction:column; gap:10px; padding:14px; border:1px solid var(--line); border-radius:16px; background:var(--panel); }
-.jimeng-verify-head { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
-.jimeng-verify-head .action-btn { flex:0 0 auto; }
 .jimeng-credit { min-height:20px; color:var(--text); font-size:12px; line-height:1.55; font-weight:800; white-space:pre-wrap; word-break:break-word; }
-.jimeng-output { display:grid; grid-template-columns:auto minmax(0,1fr); gap:12px; align-items:start; padding:12px; border:1px solid var(--line); border-radius:14px; background:var(--panel); }
+.jimeng-output { display:grid; grid-template-columns:auto minmax(0,1fr); gap:12px; align-items:start; padding:10px; border:1px solid var(--line); border-radius:12px; background:var(--panel); }
 .jimeng-output[hidden] { display:none !important; }
 .jimeng-output pre { margin:0; max-height:260px; overflow:auto; color:var(--text); font:11px/1.45 ui-monospace,Menlo,Consolas,monospace; white-space:pre-wrap; word-break:break-word; }
 .jimeng-qr-img { width:180px; height:180px; object-fit:contain; border-radius:10px; border:1px solid var(--line); background:#fff; }
@@ -6026,7 +6022,3 @@ html.studio-theme-dark body .recommend-tag.recommend-free-tag svg {
         display:none !important;
     }
 }
-.jimeng-verify-card .verify-action-row { display:flex; align-items:flex-start; gap:8px; flex-wrap:wrap; }
-.jimeng-verify-card .protocol-selector-wrap, .jimeng-verify-card .image-request-mode-wrap { min-width:180px; flex:1 1 220px; }
-.jimeng-verify-card .protocol-selector-wrap select, .jimeng-verify-card .image-request-mode-wrap select { width:100%; }
-@media (max-width: 860px) { .jimeng-verify-card .protocol-selector-wrap, .jimeng-verify-card .image-request-mode-wrap { flex:1 1 100%; min-width:0; } }

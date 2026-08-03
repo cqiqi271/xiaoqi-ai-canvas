@@ -1,14 +1,22 @@
 {
-  "version": "2026.07.23",
-  "updated_at": "2026-07-23T21:50:36+08:00",
+  "version": "2026.08.04",
+  "updated_at": "2026-08-04T02:20:00+08:00",
   "items": [
     {
       "type": "feature",
-      "text": "修复即梦CLI报错，新增5.0pro和SD2.0 mini协议，新增图片2k/4k/8k放大选项"
+      "text": "同步官方最新版，并保留小七AI画布的本地定制内容。"
     },
     {
       "type": "feature",
-      "text": "新增土豆API协议"
+      "text": "更新公告支持点击查看，方便直接看到本次更新内容。"
+    },
+    {
+      "type": "feature",
+      "text": "在线更新入口已改为可配置地址，后续可切换成你自己的更新源。"
+    },
+    {
+      "type": "feature",
+      "text": "推荐 API 页面只保留小七API和 Agnes AI，默认地址改为 https://api.lvziai.xyz。"
     }
   ]
 }
