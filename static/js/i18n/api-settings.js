@@ -1,4 +1,4 @@
-(function(){
+﻿(function(){
     if(!window.StudioI18n) return;
     window.StudioI18n.register({
         "api.title": { zh: "API 设置", en: "API Settings" },
@@ -175,8 +175,8 @@
         "api.recommendModelScopeFree": { zh: "免费额度", en: "Free quota" },
         "api.recommendAgnesSummary": { zh: "免费可用的 Agnes AI 接口，支持图像与视频生成，适合快速测试和低成本接入。", en: "Free Agnes AI API for image and video generation, suitable for quick testing and low-cost setup." },
         "api.recommendAgnesFree": { zh: "免费", en: "Free" },
-        "api.recommendSeedancePrivateNote": { zh: "海外版本 Seedance，稳定不掺水", en: "Overseas Seedance version, stable and clean" },
-        "api.recommendSeedancePrivateAction": { zh: "B站私信", en: "Message on Bilibili" },
+        "api.recommendSeedancePrivateNote": { zh: "使用途中有不动或者建议可反馈联系", en: "If anything gets stuck or you have suggestions, please contact us." },
+        "api.recommendSeedancePrivateAction": { zh: "点击联系", en: "Click to Contact" },
         "api.recommendFeatured": { zh: "首选推荐", en: "Top Pick" },
         "api.tagImageModels": { zh: "图像模型", en: "Image Models" },
         "api.tagVideoModels": { zh: "视频模型", en: "Video Models" },
@@ -186,3 +186,4 @@
         "api.tagGptImage2": { zh: "GPT image 2模型", en: "GPT image 2 Models" }
     });
 })();
+

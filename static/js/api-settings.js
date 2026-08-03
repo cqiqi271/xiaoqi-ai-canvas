@@ -2295,7 +2295,7 @@ function renderRecommendApi(){
         <div class="recommend-note recommend-seedance-private-note">
             <span class="recommend-seedance-private-icon"><i data-lucide="video" class="w-3.5 h-3.5"></i></span>
             <span class="recommend-seedance-private-text">${escapeHtml(tr('api.recommendSeedancePrivateNote'))}</span>
-            <a class="recommend-seedance-private-link" href="https://space.bilibili.com/78652351" target="_blank" rel="noopener noreferrer">
+            <a class="recommend-seedance-private-link" href="/static/project-home.html" target="_blank" rel="noopener noreferrer">
                 <i data-lucide="send" class="w-3.5 h-3.5"></i>
                 <span>${escapeHtml(tr('api.recommendSeedancePrivateAction'))}</span>
             </a>
@@ -3936,4 +3936,5 @@ window.onload = () => {
         });
     });
 };
+
 
