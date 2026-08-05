@@ -260,6 +260,8 @@ let imageEditBaseH = 0;
 let previewZoom = 1.0;
 let previewPan = {x:0, y:0};
 let previewPanDrag = null;
+let previewSpaceDown = false;
+let previewAltDown = false;
 let previewCompareDrag = false;
 let previewComparePos = 50;
 let imageEditPanDrag = null;
@@ -6680,6 +6682,36 @@ function downloadNameForMediaItem(item, fallbackPrefix='canvas-output'){
     if(!/\.[a-z0-9]{2,8}$/i.test(name)) name += ext;
     return name;
 }
+function smartImageDragMime(filename='image.png', url=''){
+    const value = `${filename} ${url}`.toLowerCase();
+    if(/\.(jpe?g)(?:[?#\s]|$)/.test(value)) return 'image/jpeg';
+    if(/\.webp(?:[?#\s]|$)/.test(value)) return 'image/webp';
+    if(/\.gif(?:[?#\s]|$)/.test(value)) return 'image/gif';
+    if(/\.bmp(?:[?#\s]|$)/.test(value)) return 'image/bmp';
+    return 'image/png';
+}
+function smartDragDownloadHref(item, filename='image.png'){
+    const raw = smartOriginalMediaUrl(item?.url || item);
+    if(!raw) return '';
+    const href = (raw.startsWith('data:') || raw.startsWith('blob:') || raw.startsWith('/api/download-output'))
+        ? raw
+        : `/api/download-output?url=${encodeURIComponent(raw)}&name=${encodeURIComponent(filename || downloadNameForMediaItem({url:raw}, 'image'))}`;
+    try { return new URL(href, window.location.href).href; } catch(_) { return href; }
+}
+function bindSmartExternalImageDrag(img, item, fallbackPrefix='image'){
+    if(!img || !item?.url) return;
+    const name = downloadNameForMediaItem(item, fallbackPrefix);
+    const href = smartDragDownloadHref(item, name);
+    img.draggable = true;
+    img.title = '拖到桌面或文件夹保存图片';
+    img.ondragstart = event => {
+        event.stopPropagation();
+        event.dataTransfer.effectAllowed = 'copy';
+        event.dataTransfer.setData('DownloadURL', `${smartImageDragMime(name, item.url)}:${name}:${href}`);
+        event.dataTransfer.setData('text/uri-list', href);
+        event.dataTransfer.setData('text/plain', href);
+    };
+}
 function downloadPreviewImage(){
     const node = nodes.find(n => n.id === previewNavState.nodeId);
     const image = node?.images?.[previewNavState.index];
@@ -6691,6 +6723,13 @@ function downloadPreviewImage(){
     document.body.appendChild(link);
     link.click();
     link.remove();
+}
+function bindSmartPreviewDrag(img, item, fallbackPrefix='image'){
+    if(!img || !item?.url) return;
+    bindSmartExternalImageDrag(img, item, fallbackPrefix);
+    img.style.webkitUserDrag = 'element';
+    img.style.userSelect = 'none';
+    img.style.cursor = 'grab';
 }
 function downloadPreviewFile(item){
     if(!item?.url) return;
@@ -9731,6 +9770,7 @@ function refreshComparePanel(){
         currentImg.src = fallback;
     };
     const previewSrc = displayMediaUrl(editing.image || curUrl);
+    bindSmartPreviewDrag(currentImg, editing.image, 'image');
     const quickPreviewSrc = smartMediaPreviewUrl(editing.image || curUrl, 1536);
     const previewToken = `${editing.node?.id || ''}:${editing.index ?? 0}:${Date.now()}`;
     currentImg.dataset.previewSrcToken = previewToken;
@@ -9775,6 +9815,7 @@ function refreshComparePanel(){
     if(sliderActive){
         const src = sources[previewCompareIndex];
         compareImg.src = src?.url || '';
+        bindSmartPreviewDrag(compareImg, src, 'compare');
         compareImg.onload = syncPreviewFrameSize;
         syncPreviewFrameSize();
         stage.classList.add('compare-on');
@@ -16270,6 +16311,14 @@ window.addEventListener('paste', e => {
 window.addEventListener('keydown', e => {
     const key = String(e.key || '').toLowerCase();
     if(key === 'r' && !isEditableTarget(e.target)) isRKeyDown = true;
+    if(e.code === 'Space' && imageEditModal.classList.contains('open') && imageEditMode === 'preview' && !isEditableTarget(e.target)){
+        previewSpaceDown = true;
+        e.preventDefault();
+    }
+    if(e.key === 'Alt' && imageEditModal.classList.contains('open') && imageEditMode === 'preview' && !isEditableTarget(e.target)){
+        previewAltDown = true;
+        e.preventDefault();
+    }
     if(imageEditModal.classList.contains('open') && imageEditMode === 'preview' && !isEditableTarget(e.target)){
         if(e.key === 'ArrowLeft' || e.key === 'ArrowRight'){
             e.preventDefault();
@@ -16338,9 +16387,13 @@ window.addEventListener('keydown', e => {
 });
 window.addEventListener('keyup', e => {
     if(String(e.key || '').toLowerCase() === 'r') isRKeyDown = false;
+    if(e.code === 'Space') previewSpaceDown = false;
+    if(e.key === 'Alt') previewAltDown = false;
 });
 window.addEventListener('blur', () => {
     isRKeyDown = false;
+    previewSpaceDown = false;
+    previewAltDown = false;
 });
 engineSelect.onchange = () => {
     settings.engine = engineSelect.value;
@@ -16909,6 +16962,7 @@ document.getElementById('previewStage').addEventListener('mousedown', event => {
     if(event.target.closest('.preview-tools-overlay, .preview-download-overlay')) return;
     if(event.target.closest('.preview-compare-handle')) return;
     if(event.target.closest('video')) return;
+    if(!(previewSpaceDown || previewAltDown)) return;
     event.preventDefault();
     event.stopPropagation();
     if(panoramaState.enabled){

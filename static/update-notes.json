@@ -1,26 +1,18 @@
 {
-  "version": "2026.08.04",
-  "updated_at": "2026-08-04T03:20:00+08:00",
+  "version": "2026.08.05.1",
+  "updated_at": "2026-08-05T14:30:00+08:00",
   "items": [
     {
       "type": "feature",
-      "text": "普通画布新增 Midjourney 协议生成卡片。"
-    },
-    {
-      "type": "fix",
-      "text": "修复 APIMART 香蕉生成报错问题。"
+      "text": "\u666e\u901a\u753b\u5e03\u9884\u89c8\u65b0\u589e Alt + \u5de6\u952e\u62d6\u52a8\u3002"
     },
     {
       "type": "feature",
-      "text": "新增土豆异步协议支持。"
+      "text": "\u667a\u80fd\u753b\u5e03\u9884\u89c8\u540c\u6b65\u652f\u6301 Alt + \u5de6\u952e\u62d6\u52a8\u3002"
     },
     {
       "type": "feature",
-      "text": "推荐 API 页面调整为小七API和 Agnes AI，小七API 默认地址为 https://api.lvziai.xyz。"
-    },
-    {
-      "type": "feature",
-      "text": "侧边栏新增可点击展开的更新公告。"
+      "text": "\u4fdd\u7559\u7a7a\u683c + \u5de6\u952e\u62d6\u52a8\uff0c\u4e24\u4e2a\u753b\u5e03\u7684\u9884\u89c8\u64cd\u4f5c\u4fdd\u6301\u4e00\u81f4\u3002"
     }
   ]
 }

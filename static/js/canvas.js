@@ -299,6 +299,8 @@ const outputResolution = document.getElementById('outputResolution');
 const outputDownloadBtn = document.getElementById('outputDownloadBtn');
 const outputDownloadAllBtn = document.getElementById('outputDownloadAllBtn');
 const outputLightboxVideo = document.getElementById('outputLightboxVideo');
+let outputPreviewSpaceDown = false;
+let outputPreviewAltDown = false;
 const outputPromptPanel = document.getElementById('outputPromptPanel');
 const outputPromptText = document.getElementById('outputPromptText');
 const outputCopyPromptBtn = document.getElementById('outputCopyPromptBtn');
@@ -13510,7 +13512,7 @@ function initOutputPreviewZoomEvents(){
     }, {passive:false});
     outputPreview.addEventListener('mousedown', e => {
         if(outputLightboxVideo.style.display === 'block') return;
-        if(e.button !== 0 || outputPreviewZoom <= 1.001) return;
+        if(e.button !== 0 || !(outputPreviewSpaceDown || outputPreviewAltDown)) return;
         if(e.target.closest('.output-preview-actions, .output-resolution, .output-compare-slider')) return;
         outputPreviewPanDrag = {
             sx:e.clientX,
@@ -13610,15 +13612,18 @@ function openOutputLightbox(url, out){
     }
     outputLightboxVideo.pause();
     outputLightboxVideo.src = '';
-    outputLightboxImg.draggable = false;
-    outputCompareResult.draggable = false;
-    outputCompareOriginal.draggable = false;
+    outputLightboxImg.draggable = true;
+    outputCompareResult.draggable = true;
+    outputCompareOriginal.draggable = Boolean(currentOutputCompareUrl);
     outputLightboxImg.onload = () => {
         outputResolutionText(`${outputLightboxImg.naturalWidth} x ${outputLightboxImg.naturalHeight}`, meta);
     };
     outputLightboxImg.src = canvasDisplayMediaUrl(url, outputDownloadName(url));
     outputCompareResult.src = canvasDisplayMediaUrl(url, outputDownloadName(url));
     outputCompareOriginal.src = currentOutputCompareUrl ? canvasDisplayMediaUrl(currentOutputCompareUrl, outputDownloadName(currentOutputCompareUrl)) : '';
+    bindOutputExternalImageDrag(outputLightboxImg, url, outputDownloadName(url));
+    bindOutputExternalImageDrag(outputCompareResult, url, outputDownloadName(url));
+    if(currentOutputCompareUrl) bindOutputExternalImageDrag(outputCompareOriginal, currentOutputCompareUrl, outputDownloadName(currentOutputCompareUrl));
     outputPreview.ondblclick = e => {
         e.stopPropagation();
         if(!currentOutputCompareUrl) return;
@@ -13919,6 +13924,36 @@ function downloadUrl(url, filename='download'){
     link.click();
     link.remove();
     return Promise.resolve(true);
+}
+function outputDragDownloadHref(url, filename='download'){
+    const raw = canvasOriginalMediaUrl(url);
+    if(!raw) return '';
+    const href = (raw.startsWith('data:') || raw.startsWith('blob:') || raw.startsWith('/api/download-output'))
+        ? raw
+        : `/api/download-output?url=${encodeURIComponent(raw)}&name=${encodeURIComponent(filename || outputDownloadName(raw))}`;
+    try { return new URL(href, window.location.href).href; } catch(_) { return href; }
+}
+function outputImageDragMime(filename='image.png', url=''){
+    const value = `${filename} ${url}`.toLowerCase();
+    if(/\.(jpe?g)(?:[?#\s]|$)/.test(value)) return 'image/jpeg';
+    if(/\.webp(?:[?#\s]|$)/.test(value)) return 'image/webp';
+    if(/\.gif(?:[?#\s]|$)/.test(value)) return 'image/gif';
+    if(/\.bmp(?:[?#\s]|$)/.test(value)) return 'image/bmp';
+    return 'image/png';
+}
+function bindOutputExternalImageDrag(img, url, filename='image.png'){
+    if(!img || !url) return;
+    const name = filename || outputDownloadName(url);
+    const href = outputDragDownloadHref(url, name);
+    img.draggable = true;
+    img.title = '拖到桌面或文件夹保存图片';
+    img.ondragstart = event => {
+        event.stopPropagation();
+        event.dataTransfer.effectAllowed = 'copy';
+        event.dataTransfer.setData('DownloadURL', `${outputImageDragMime(name, url)}:${name}:${href}`);
+        event.dataTransfer.setData('text/uri-list', href);
+        event.dataTransfer.setData('text/plain', href);
+    };
 }
 function openWorkflowTransferModal(){
     if(!canvas){ setStatus(tr('canvas.needCanvas')); return; }
@@ -14978,6 +15013,14 @@ window.addEventListener('paste', e => {
 window.addEventListener('keydown', e => {
     if(!canvas) return;
     const key = String(e.key || '').toLowerCase();
+    if(e.code === 'Space' && outputLightbox.classList.contains('open') && !isEditableTarget(e.target)){
+        outputPreviewSpaceDown = true;
+        e.preventDefault();
+    }
+    if(e.key === 'Alt' && outputLightbox.classList.contains('open') && !isEditableTarget(e.target)){
+        outputPreviewAltDown = true;
+        e.preventDefault();
+    }
     if(key === 'r' && !isEditableTarget(e.target)) isRKeyDown = true;
     if(e.key === 'Shift' && !e.altKey && !isEditableTarget(document.activeElement)) setKnifeMode(true);
     if(e.key === 'Escape' && document.getElementById('imageEditModal').classList.contains('open')) { closeImageEditor(); return; }
@@ -15040,9 +15083,11 @@ window.addEventListener('keydown', e => {
 });
 window.addEventListener('keyup', e => {
     if(String(e.key || '').toLowerCase() === 'r') isRKeyDown = false;
+    if(e.code === 'Space') outputPreviewSpaceDown = false;
+    if(e.key === 'Alt') outputPreviewAltDown = false;
     if(e.key === 'Shift') setKnifeMode(false);
 });
-window.addEventListener('blur', () => { isRKeyDown = false; setKnifeMode(false); });
+window.addEventListener('blur', () => { isRKeyDown = false; outputPreviewSpaceDown = false; outputPreviewAltDown = false; setKnifeMode(false); });
 window.addEventListener('blur', () => {
     if(selectDrag){
         selectionBox.style.display = 'none';

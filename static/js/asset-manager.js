@@ -2570,6 +2570,37 @@ function downloadUrl(url, filename='download'){
     link.click();
     link.remove();
 }
+function downloadOutputHref(url, filename='download'){
+    if(!url) return '';
+    const raw = String(url || '');
+    if(raw.startsWith('/api/download-output')) return raw;
+    return `/api/download-output?url=${encodeURIComponent(raw)}&name=${encodeURIComponent(filename || 'download')}`;
+}
+function imageDragMime(filename='image.png', url=''){
+    const value = `${filename} ${url}`.toLowerCase();
+    if(/\.(jpe?g)(?:[?#\s]|$)/.test(value)) return 'image/jpeg';
+    if(/\.webp(?:[?#\s]|$)/.test(value)) return 'image/webp';
+    if(/\.gif(?:[?#\s]|$)/.test(value)) return 'image/gif';
+    if(/\.bmp(?:[?#\s]|$)/.test(value)) return 'image/bmp';
+    return 'image/png';
+}
+function absoluteUrl(url){
+    try { return new URL(String(url || ''), window.location.href).href; } catch(_) { return String(url || ''); }
+}
+function bindExternalImageDrag(img, url, filename='image.png'){
+    if(!img || !url) return;
+    const name = filename || 'image.png';
+    const href = absoluteUrl(downloadOutputHref(url, name));
+    img.draggable = true;
+    img.title = '拖到桌面或文件夹保存图片';
+    img.addEventListener('dragstart', event => {
+        event.stopPropagation();
+        event.dataTransfer.effectAllowed = 'copy';
+        event.dataTransfer.setData('DownloadURL', `${imageDragMime(name, url)}:${name}:${href}`);
+        event.dataTransfer.setData('text/uri-list', href);
+        event.dataTransfer.setData('text/plain', href);
+    });
+}
 async function exportWorkflowItems(ids){
     const items = (ids || []).map(id => findWorkflowItem(id)).filter(item => item?.url);
     if(!items.length) return;
@@ -3803,6 +3834,7 @@ function showDetailPreview(source, id){
     }
     const url = source === 'local' ? localObjectUrl(item) : item.url;
     if(!url) return;
+    const filename = assetDownloadName({...item, url});
     document.querySelector('.asset-lightbox')?.remove();
     const overlay = document.createElement('div');
     overlay.className = 'asset-lightbox';
@@ -3813,10 +3845,11 @@ function showDetailPreview(source, id){
         <div class="asset-lightbox-inner" role="dialog" aria-modal="true" aria-label="${kind === 'video' ? '视频预览' : '图片预览'}">
             ${kind === 'video'
                 ? `<video class="asset-lightbox-video" src="${escapeAttr(url)}" controls autoplay playsinline preload="metadata"></video>`
-                : `<img class="asset-lightbox-image" src="${escapeAttr(url)}" alt="${escapeAttr(item.name || 'preview')}" draggable="false">`}
+                : `<img class="asset-lightbox-image" src="${escapeAttr(url)}" alt="${escapeAttr(item.name || 'preview')}" draggable="true" data-drag-save-url="${escapeAttr(url)}" data-drag-save-name="${escapeAttr(filename)}">`}
         </div>
     `;
     document.body.appendChild(overlay);
+    if(kind === 'image') bindExternalImageDrag(overlay.querySelector('.asset-lightbox-image'), url, filename);
     document.body.classList.add('asset-lightbox-open');
 }
 function closeDetailPreview(){

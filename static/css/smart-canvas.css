@@ -512,6 +512,7 @@ video.node-img { object-fit:cover; background:#0f172a; }
 .jimeng-pending-query:disabled i { animation:spin 1s linear infinite; }
 .image-edit-mode button[data-image-edit-mode="preview"] i { stroke-width:2; }
 .preview-stage { position:relative; display:inline-flex; align-items:center; justify-content:center; line-height:0; user-select:none; cursor:grab; }
+.preview-stage #previewCurrentImage,.preview-stage #previewCompareImage { cursor:grab; -webkit-user-drag:element; }
 .preview-stage.panning { cursor:grabbing; }
 .preview-stage.panorama-on { cursor:grab; }
 .preview-stage.panorama-on.panning { cursor:grabbing; }
