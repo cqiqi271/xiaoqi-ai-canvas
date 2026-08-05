@@ -2062,18 +2062,66 @@ def github_bytes(url: str) -> bytes:
     resp = github_get(url, headers={"User-Agent": "Infinite-Canvas-Updater"}, timeout=60)
     return resp.content
 
+def github_repo_contents_url(rel: str) -> str:
+    repo_url = (read_project_config().get("repo_url") or GITHUB_REPO_URL).rstrip("/")
+    m = re.search(r"github\.com/([^/]+)/([^/]+?)(?:\.git)?$", repo_url)
+    owner, repo = (m.group(1), m.group(2)) if m else ("cqiqi271", "xiaoqi-ai-canvas")
+    return f"https://api.github.com/repos/{owner}/{repo}/contents/{urllib.parse.quote(rel, safe='/')}?ref=main"
+
+def github_repo_zip_url() -> str:
+    repo_url = (read_project_config().get("repo_url") or GITHUB_REPO_URL).rstrip("/")
+    m = re.search(r"github\.com/([^/]+)/([^/]+?)(?:\.git)?$", repo_url)
+    owner, repo = (m.group(1), m.group(2)) if m else ("cqiqi271", "xiaoqi-ai-canvas")
+    return f"https://codeload.github.com/{owner}/{repo}/zip/refs/heads/main"
+
+def github_file_bytes(rel: str) -> bytes:
+    raw_root = (read_project_config().get('raw_root_url') or GITHUB_RAW_ROOT).rstrip('/')
+    raw_url = f"{raw_root}/{urllib.parse.quote(rel, safe='/')}"
+    try:
+        return github_bytes(raw_url)
+    except Exception:
+        pass
+    data = github_json(github_repo_contents_url(rel))
+    content = data.get("content") if isinstance(data, dict) else ""
+    encoding = str(data.get("encoding") or "") if isinstance(data, dict) else ""
+    if not content or encoding.lower() != "base64":
+        raise RuntimeError(f"GitHub 文件读取失败：{rel}")
+    return base64.b64decode(content.encode("utf-8"))
+
 def download_github_update_files(files: List[str], staging_root: str) -> None:
     staging_root_abs = os.path.abspath(staging_root)
     for rel in files:
         safe_update_target(rel)
-        raw_url = f"{(read_project_config().get('raw_root_url') or GITHUB_RAW_ROOT).rstrip('/')}/{urllib.parse.quote(rel, safe='/')}"
-        data = github_bytes(raw_url)
+        data = github_file_bytes(rel)
         stage_path = os.path.abspath(os.path.join(staging_root_abs, *rel.split("/")))
         if os.path.commonpath([staging_root_abs, stage_path]) != staging_root_abs:
             raise ValueError(f"更新暂存路径不安全：{rel}")
         os.makedirs(os.path.dirname(stage_path), exist_ok=True)
         with open(stage_path, "wb") as f:
             f.write(data)
+
+def download_github_zip_update_files(staging_root: str) -> Tuple[List[str], List[str], List[str]]:
+    data = github_bytes(github_repo_zip_url())
+    staging_root_abs = os.path.abspath(staging_root)
+    with zipfile.ZipFile(BytesIO(data)) as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            name = info.filename.replace("\\", "/")
+            parts = name.split("/", 1)
+            if len(parts) != 2:
+                continue
+            rel = parts[1]
+            if not update_allowed_file(rel):
+                continue
+            safe_update_target(rel)
+            stage_path = os.path.abspath(os.path.join(staging_root_abs, *rel.split("/")))
+            if os.path.commonpath([staging_root_abs, stage_path]) != staging_root_abs:
+                raise ValueError(f"更新暂存路径不安全：{rel}")
+            os.makedirs(os.path.dirname(stage_path), exist_ok=True)
+            with zf.open(info) as src, open(stage_path, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+    return staged_update_file_list(staging_root)
 
 def modelscope_update_file_list() -> List[str]:
     """通过 ModelScope 仓库文件 API 列出所有允许更新的文件（不依赖 git）。"""
@@ -2277,14 +2325,20 @@ def stage_update_from_source(source: str, staging_root: str) -> Tuple[List[str],
     if source == "modelscope":
         cfg = read_project_config()
         if not cfg.get("mirror_tree_url") and cfg.get("tree_url"):
-            root_files, static_files, files = github_update_file_list()
-            download_github_update_files(files, staging_root)
-            return root_files, static_files, files
+            try:
+                return download_github_zip_update_files(staging_root)
+            except Exception:
+                root_files, static_files, files = github_update_file_list()
+                download_github_update_files(files, staging_root)
+                return root_files, static_files, files
         download_modelscope_update_files(staging_root)
         return staged_update_file_list(staging_root)
-    root_files, static_files, files = github_update_file_list()
-    download_github_update_files(files, staging_root)
-    return root_files, static_files, files
+    try:
+        return download_github_zip_update_files(staging_root)
+    except Exception:
+        root_files, static_files, files = github_update_file_list()
+        download_github_update_files(files, staging_root)
+        return root_files, static_files, files
 
 def validate_staged_update(staging_root: str, root_files: List[str], static_files: List[str]) -> None:
     """Reject incomplete or syntactically invalid downloads before touching live code."""
