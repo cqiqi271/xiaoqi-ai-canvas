@@ -1604,7 +1604,7 @@ def fetch_update_notes_with_fallback(preferred_source: str, version: str, timeou
     cfg = read_project_config()
     urls = {
         "github": cfg.get("update_notes_url") or GITHUB_UPDATE_NOTES_URL,
-        "modelscope": cfg.get("mirror_update_notes_url") or MODELSCOPE_UPDATE_NOTES_URL,
+        "modelscope": cfg.get("mirror_update_notes_url") or cfg.get("update_notes_url") or GITHUB_UPDATE_NOTES_URL,
     }
     preferred = preferred_source if preferred_source in urls else "github"
     order = [preferred, "modelscope" if preferred == "github" else "github"]
@@ -1803,10 +1803,11 @@ def app_info():
     github_version_url = cfg.get("version_url") or GITHUB_VERSION_URL
     github_tree_url = cfg.get("tree_url") or GITHUB_TREE_URL
     github_notes_url = cfg.get("update_notes_url") or GITHUB_UPDATE_NOTES_URL
-    modelscope_repo_url = cfg.get("mirror_repo_url") or MODELSCOPE_REPO_URL
-    modelscope_version_url = cfg.get("mirror_version_url") or MODELSCOPE_VERSION_URL
-    modelscope_tree_url = cfg.get("mirror_tree_url") or MODELSCOPE_TREE_URL
-    modelscope_notes_url = cfg.get("mirror_update_notes_url") or MODELSCOPE_UPDATE_NOTES_URL
+    modelscope_repo_url = cfg.get("mirror_repo_url") or repo_url
+    modelscope_version_url = cfg.get("mirror_version_url") or github_version_url
+    modelscope_tree_url = cfg.get("mirror_tree_url") or github_tree_url
+    modelscope_notes_url = cfg.get("mirror_update_notes_url") or github_notes_url
+    modelscope_raw_root = cfg.get("mirror_raw_root_url") or cfg.get("raw_root_url") or GITHUB_RAW_ROOT
     return {
         "version": version,
         "project_name": cfg.get("project_name") or "小七AI画布",
@@ -1824,12 +1825,12 @@ def app_info():
                 "raw_root_url": cfg.get("raw_root_url") or GITHUB_RAW_ROOT,
             },
             "modelscope": {
-                "label": "备用更新源" if cfg.get("mirror_version_url") else "ModelScope",
+                "label": "备用更新源" if cfg.get("mirror_version_url") else "GitHub 备用源",
                 "repo_url": modelscope_repo_url,
                 "version_url": modelscope_version_url,
                 "tree_url": modelscope_tree_url,
                 "update_notes_url": modelscope_notes_url,
-                "raw_root_url": cfg.get("mirror_raw_root_url") or "",
+                "raw_root_url": modelscope_raw_root,
             },
         },
         "update_notes": read_local_update_notes(version),
@@ -1869,13 +1870,20 @@ def connectivity_probe(name: str, url: str, timeout: float = 5.0) -> Dict[str, A
     return item
 
 def update_connectivity_targets() -> List[Tuple[str, str, str, bool]]:
+    cfg = read_project_config()
+    github_tree_url = cfg.get("tree_url") or GITHUB_TREE_URL
+    github_version_url = cfg.get("version_url") or GITHUB_VERSION_URL
+    github_repo_url = cfg.get("repo_url") or GITHUB_REPO_URL
+    mirror_tree_url = cfg.get("mirror_tree_url") or github_tree_url
+    mirror_version_url = cfg.get("mirror_version_url") or github_version_url
+    mirror_repo_url = cfg.get("mirror_repo_url") or github_repo_url
     return [
-        ("GitHub 更新列表", GITHUB_TREE_URL, "github", True),
-        ("GitHub 版本文件", GITHUB_VERSION_URL, "github", True),
-        ("GitHub 主页", "https://github.com/", "github", False),
-        ("ModelScope 版本文件", MODELSCOPE_VERSION_URL, "modelscope", True),
-        ("ModelScope 空间页面", MODELSCOPE_REPO_URL, "modelscope", False),
-        ("ModelScope 主页", "https://modelscope.cn/", "modelscope", False),
+        ("GitHub 更新列表", github_tree_url, "github", True),
+        ("GitHub 版本文件", github_version_url, "github", True),
+        ("GitHub 主页", github_repo_url, "github", False),
+        ("ModelScope 版本文件", mirror_version_url, "modelscope", True),
+        ("ModelScope 空间页面", mirror_repo_url, "modelscope", False),
+        ("ModelScope 主页", mirror_repo_url, "modelscope", False),
         ("Google 连通性", "https://www.google.com/generate_204", "reference", False),
     ]
 
@@ -2084,7 +2092,9 @@ def modelscope_update_file_list() -> List[str]:
     return sorted(set(out))
 
 def modelscope_file_bytes(rel: str) -> bytes:
-    url = (read_project_config().get("mirror_raw_root_url") or MODELSCOPE_FILE_API_ROOT).rstrip("/") + "/" + urllib.parse.quote(rel, safe="/")
+    cfg = read_project_config()
+    root = cfg.get("mirror_raw_root_url") or cfg.get("raw_root_url") or MODELSCOPE_FILE_API_ROOT
+    url = root.rstrip("/") + "/" + urllib.parse.quote(rel, safe="/")
     resp = github_get(url, headers={"User-Agent": "Infinite-Canvas-Updater"}, timeout=60)
     return resp.content
 
@@ -2265,6 +2275,11 @@ def normalize_update_source(value: str) -> str:
 def stage_update_from_source(source: str, staging_root: str) -> Tuple[List[str], List[str], List[str]]:
     """下载指定源的更新文件到 staging，返回 (root_files, static_files, files)。失败抛异常。"""
     if source == "modelscope":
+        cfg = read_project_config()
+        if not cfg.get("mirror_tree_url") and cfg.get("tree_url"):
+            root_files, static_files, files = github_update_file_list()
+            download_github_update_files(files, staging_root)
+            return root_files, static_files, files
         download_modelscope_update_files(staging_root)
         return staged_update_file_list(staging_root)
     root_files, static_files, files = github_update_file_list()
