@@ -3396,6 +3396,7 @@ function outputImageUrls(node){
 function outputDownloadableImageUrls(node){
     return (node?.images || []).map(outputUrlValue).filter(url => url && !isMissingAssetUrl(url) && (url.startsWith('/output/') || url.startsWith('/assets/')));
 }
+function outputDownloadableImageItems(node){return (node?.images || []).map((item,index)=>({url:outputUrlValue(item),name:outputImageName(outputUrlValue(item))||`image-${String(index+1).padStart(2,'0')}.png`})).filter(item=>item.url&&!isMissingAssetUrl(item.url)&&(item.url.startsWith('/output/')||item.url.startsWith('/assets/')));}
 function groupImageItems(group){
     if(!group || group.type !== 'group') return [];
     return (group.items || [])
@@ -13662,7 +13663,15 @@ function closeOutputLightbox(){
 }
 function groupSelectedImages(){
     if(!ensureCanvas()) return;
-    const targets = [...selected].map(id => nodes.find(n => n.id === id)).filter(n => n?.type === 'image' || n?.type === 'prompt');
+    const targetMap = new Map();
+    const collectTarget = node => {
+        if(node?.type === 'image' || node?.type === 'prompt') targetMap.set(node.id, node);
+        if(node?.type === 'group' || node?.type === 'promptGroup'){
+            (node.items || []).forEach(id => collectTarget(nodes.find(n => n.id === id)));
+        }
+    };
+    [...selected].forEach(id => collectTarget(nodes.find(n => n.id === id)));
+    const targets = [...targetMap.values()];
     let group;
     pushUndo();
     if(targets.length){
@@ -13925,6 +13934,27 @@ function downloadUrl(url, filename='download'){
     link.remove();
     return Promise.resolve(true);
 }
+
+/* Final lightweight viewport updater: delay high-res image swapping until panning settles. */
+function applyViewport(){
+    world.style.transform = `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`; 
+    scheduleMinimapRender();
+    scheduleCanvasImageResolutionSync(nodesEl, 420);
+}
+window.addEventListener('keydown', e => {
+    const key = String(e.key || '').toLowerCase();
+    if(!((e.ctrlKey || e.metaKey) && e.shiftKey && key === 'g') || isEditableTarget(e.target)) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    const groups = [...selected].map(id => nodes.find(n => n.id === id)).filter(n => n?.type === 'group');
+    if(!groups.length) return;
+    pushUndo();
+    const groupIds = new Set(groups.map(group => group.id));
+    nodes = nodes.filter(n => !groupIds.has(n.id));
+    selected.clear();
+    render();
+    scheduleSave();
+}, true);
 function outputDragDownloadHref(url, filename='download'){
     const raw = canvasOriginalMediaUrl(url);
     if(!raw) return '';
@@ -15045,6 +15075,12 @@ window.addEventListener('keydown', e => {
         toggleZoomPreview();
         return;
     }
+    if(!e.ctrlKey && !e.metaKey && !e.altKey && key === 'a' && !isEditableTarget(e.target)){
+        if(e.repeat) return;
+        e.preventDefault();
+        toggleCanvasAssetLibrary();
+        return;
+    }
     if((e.ctrlKey || e.metaKey) && key === 'g') { e.preventDefault(); groupSelectedImages(); }
     if((e.ctrlKey || e.metaKey) && key === 'c') {
         // 在输入框/可编辑元素里时，让浏览器原生 Ctrl+C 工作
@@ -15158,3 +15194,22 @@ window.onload = async () => {
         window.location.replace(canvasListUrlForProject(rememberedCanvasListProject()));
     }
 };
+/* Explicit-item variant prevents output downloads from collapsing to a single URL. */
+async function downloadOutputNodeImages(nodeId){
+    const node = nodes.find(n => n.id === nodeId);
+    const items = outputDownloadableImageItems(node);
+    if(!node || !items.length){ alert(tr('canvas.outputDownloadEmpty')); return; }
+    const filename = safeDownloadFileName(`${(canvas?.title || 'canvas-output').slice(0, 48)}-${node.id}.zip`, 'canvas-output.zip');
+    const res = await fetch('/api/canvas-assets/download', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({filename, items:items.map((item,index)=>({url:item.url, name:downloadNameForGroupImage(item,index)}))})});
+    if(!res.ok) throw new Error(await responseErrorMessage(res, tr('canvas.outputDownloadEmpty')));
+    const href = URL.createObjectURL(await res.blob());
+    const link = document.createElement('a'); link.href = href; link.download = filename; document.body.appendChild(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(href), 1200);
+}
+window.addEventListener('keydown', e => {
+    const key = String(e.key || '').toLowerCase();
+    if(!((e.ctrlKey || e.metaKey) && !e.shiftKey && key === 'g') || isEditableTarget(e.target)) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    groupSelectedImages();
+}, true);

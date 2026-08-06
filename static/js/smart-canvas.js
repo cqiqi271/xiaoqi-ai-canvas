@@ -7457,6 +7457,7 @@ function smartGroupToolbarHtml(node){
 }
 function runSmartGroupToolbarAction(nodeId, action){
     const group = nodes.find(n => n.id === nodeId);
+    if(action === 'download'){ zipDownloadImageItems(group?.title, smartGroupImageRefs(group).map(ref => ref.item)); return; }
     if(!isSmartGroupNode(group)) return;
     selectedId = nodeId;
     selectedIds = [];
@@ -17194,3 +17195,27 @@ window.onload = async () => {
     syncApiKindToggleVisibility();
     render();
 };
+// Batch download uses explicit items so every image, including duplicate URLs, gets its own ZIP entry.
+async function zipDownloadImageItems(title, items){
+    const list = (items || []).filter(item => item?.url);
+    if(!list.length) return;
+    const filename = safeExportFileName(`${title || 'image-group'}.zip`, 'image-group.zip');
+    const response = await fetch('/api/canvas-assets/download', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({filename, items:list.map((item,index)=>({url:item.url, name:downloadNameForMediaItem(item, `image-${String(index + 1).padStart(2, '0')}`)}))})});
+    if(!response.ok) throw new Error((await response.text()) || '批量下载失败');
+    const href = URL.createObjectURL(await response.blob());
+    const link = document.createElement('a');
+    link.href = href; link.download = filename; document.body.appendChild(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(href), 1200);
+}
+async function downloadOutputNodeImages(nodeId){
+    const node = nodes.find(n => n.id === nodeId);
+    const items = outputDownloadableImageItems(node);
+    if(!node || !items.length){ alert(tr('canvas.outputDownloadEmpty')); return; }
+    const filename = `${(canvas?.title || 'canvas-output').slice(0, 48)}-${node.id}.zip`;
+    const response = await fetch('/api/canvas-assets/download', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({filename, items:items.map((item,index)=>({url:item.url, name:downloadNameForGroupImage(item,index)}))})});
+    if(!response.ok) throw new Error(await responseErrorMessage(response, tr('canvas.outputDownloadEmpty')));
+    const href = URL.createObjectURL(await response.blob());
+    const link = document.createElement('a');
+    link.href = href; link.download = filename; document.body.appendChild(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(href), 1200);
+}

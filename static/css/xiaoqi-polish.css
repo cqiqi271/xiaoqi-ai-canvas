@@ -1,0 +1,396 @@
+/* Xiaoqi visual polish layer. Keep this file additive and easy to remove. */
+:root {
+    --xq-ink: #111827;
+    --xq-muted: #64748b;
+    --xq-line: rgba(15, 23, 42, .09);
+    --xq-line-strong: rgba(15, 23, 42, .16);
+    --xq-surface: rgba(255, 255, 255, .78);
+    --xq-surface-solid: #ffffff;
+    --xq-soft: #f5f7fb;
+    --xq-accent: #0f766e;
+    --xq-accent-2: #2563eb;
+    --xq-warm: #f59e0b;
+    --xq-danger: #e11d48;
+    --xq-radius-sm: 10px;
+    --xq-radius: 16px;
+    --xq-radius-lg: 24px;
+    --xq-shadow-sm: 0 8px 22px rgba(15, 23, 42, .07);
+    --xq-shadow: 0 18px 48px rgba(15, 23, 42, .11);
+    --xq-shadow-lg: 0 28px 80px rgba(15, 23, 42, .16);
+    --xq-blur: blur(22px) saturate(1.15);
+    --xq-ease: cubic-bezier(.22, 1, .36, 1);
+}
+
+html.theme-dark,
+html.studio-theme-dark,
+body.theme-dark,
+body.studio-theme-dark {
+    --xq-ink: #e5e7eb;
+    --xq-muted: #94a3b8;
+    --xq-line: rgba(226, 232, 240, .11);
+    --xq-line-strong: rgba(226, 232, 240, .2);
+    --xq-surface: rgba(15, 23, 42, .76);
+    --xq-surface-solid: #101826;
+    --xq-soft: #0b1220;
+    --xq-accent: #2dd4bf;
+    --xq-accent-2: #60a5fa;
+    --xq-shadow-sm: 0 8px 24px rgba(0, 0, 0, .22);
+    --xq-shadow: 0 18px 54px rgba(0, 0, 0, .34);
+    --xq-shadow-lg: 0 30px 90px rgba(0, 0, 0, .48);
+}
+
+html, body { text-rendering: optimizeLegibility; }
+body {
+    background:
+        radial-gradient(circle at 16% 12%, rgba(37, 99, 235, .08), transparent 34%),
+        radial-gradient(circle at 84% 18%, rgba(20, 184, 166, .10), transparent 30%),
+        linear-gradient(135deg, #f8fafc 0%, #eef4f8 48%, #f9fafb 100%) !important;
+}
+html.theme-dark body,
+html.studio-theme-dark body,
+body.theme-dark,
+body.studio-theme-dark {
+    background:
+        radial-gradient(circle at 18% 12%, rgba(45, 212, 191, .12), transparent 30%),
+        radial-gradient(circle at 86% 16%, rgba(96, 165, 250, .10), transparent 32%),
+        linear-gradient(135deg, #070b12 0%, #0b1220 50%, #111827 100%) !important;
+}
+
+.app-shell {
+    background: transparent !important;
+}
+
+.sidebar {
+    margin: 14px 0 14px 14px;
+    height: calc(100vh - 28px) !important;
+    max-height: calc(100vh - 28px) !important;
+    border: 1px solid var(--xq-line) !important;
+    border-radius: 26px;
+    background: linear-gradient(180deg, rgba(255,255,255,.82), rgba(255,255,255,.64)) !important;
+    box-shadow: var(--xq-shadow);
+    backdrop-filter: var(--xq-blur);
+    -webkit-backdrop-filter: var(--xq-blur);
+}
+html.theme-dark .sidebar,
+body.theme-dark .sidebar,
+html.studio-theme-dark .sidebar,
+body.studio-theme-dark .sidebar {
+    background: linear-gradient(180deg, rgba(15,23,42,.84), rgba(15,23,42,.64)) !important;
+}
+
+.logo-ring {
+    border: 1px solid var(--xq-line-strong) !important;
+    background: var(--xq-surface-solid) !important;
+    box-shadow: var(--xq-shadow-sm);
+}
+#logo-dot {
+    width: 10px !important;
+    height: 10px !important;
+    background: linear-gradient(135deg, var(--xq-accent), var(--xq-accent-2)) !important;
+    box-shadow: 0 0 0 5px rgba(20, 184, 166, .12);
+}
+
+.nav-item,
+.nav-fold-toggle,
+.side-pill,
+.update-announcement,
+.update-now-btn,
+.project-version-badge {
+    border: 1px solid transparent;
+    transition: transform .18s var(--xq-ease), background .18s var(--xq-ease), border-color .18s var(--xq-ease), box-shadow .18s var(--xq-ease), color .18s var(--xq-ease) !important;
+}
+.nav-item:hover,
+.nav-fold-toggle:hover,
+.side-pill:hover {
+    transform: translateY(-1px);
+    background: rgba(255,255,255,.7) !important;
+    border-color: var(--xq-line);
+    box-shadow: var(--xq-shadow-sm);
+}
+.nav-item.active,
+.side-pill.active {
+    background: linear-gradient(135deg, var(--xq-ink), #263244) !important;
+    color: #fff !important;
+    border-color: rgba(255,255,255,.22);
+    box-shadow: 0 14px 34px rgba(15, 23, 42, .18);
+}
+html.theme-dark .nav-item:hover,
+body.theme-dark .nav-item:hover,
+html.studio-theme-dark .nav-item:hover,
+body.studio-theme-dark .nav-item:hover,
+html.theme-dark .side-pill:hover,
+body.theme-dark .side-pill:hover,
+html.studio-theme-dark .side-pill:hover,
+body.studio-theme-dark .side-pill:hover {
+    background: rgba(30,41,59,.72) !important;
+}
+html.theme-dark .nav-item.active,
+body.theme-dark .nav-item.active,
+html.studio-theme-dark .nav-item.active,
+body.studio-theme-dark .nav-item.active,
+html.theme-dark .side-pill.active,
+body.theme-dark .side-pill.active,
+html.studio-theme-dark .side-pill.active,
+body.studio-theme-dark .side-pill.active {
+    background: linear-gradient(135deg, #e5e7eb, #cbd5e1) !important;
+    color: #0f172a !important;
+}
+
+.stage {
+    margin: 14px 14px 14px 16px !important;
+    border: 1px solid var(--xq-line) !important;
+    border-radius: 30px !important;
+    background: rgba(255,255,255,.42) !important;
+    box-shadow: var(--xq-shadow-lg), inset 0 1px 0 rgba(255,255,255,.72);
+    backdrop-filter: var(--xq-blur);
+    -webkit-backdrop-filter: var(--xq-blur);
+    overflow: hidden;
+}
+iframe {
+    border-radius: 28px !important;
+    background: transparent !important;
+}
+
+.studio-modal { backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); }
+.studio-modal-panel,
+.modal-panel,
+.dialog-panel,
+.lightbox-card,
+#lightboxCard {
+    border: 1px solid var(--xq-line) !important;
+    border-radius: 24px !important;
+    background: var(--xq-surface) !important;
+    box-shadow: var(--xq-shadow-lg) !important;
+    backdrop-filter: var(--xq-blur);
+    -webkit-backdrop-filter: var(--xq-blur);
+}
+
+.studio-modal-btn,
+button,
+.tool-btn,
+.menu-btn,
+.run-btn,
+.action-btn,
+.glass-btn,
+.btn-render,
+.mode-btn,
+.engine-btn,
+.provider-btn,
+.model-option,
+.ratio-option,
+.resolution-option {
+    transition: transform .16s var(--xq-ease), box-shadow .16s var(--xq-ease), border-color .16s var(--xq-ease), background .16s var(--xq-ease), color .16s var(--xq-ease);
+}
+.studio-modal-btn:hover,
+.tool-btn:hover,
+.menu-btn:hover,
+.run-btn:hover,
+.action-btn:hover,
+.glass-btn:hover,
+.btn-render:hover,
+.mode-btn:hover,
+.engine-btn:hover,
+.provider-btn:hover,
+.model-option:hover,
+.ratio-option:hover,
+.resolution-option:hover {
+    transform: translateY(-1px);
+}
+.studio-modal-btn.primary,
+.btn-render,
+.run-btn,
+.glass-btn.primary,
+.action-btn.primary {
+    background: linear-gradient(135deg, var(--xq-ink), #263244) !important;
+    color: #fff !important;
+    box-shadow: 0 14px 32px rgba(15, 23, 42, .18) !important;
+}
+
+.console-card,
+.nano-input,
+.upload-item,
+.result-frame,
+.masonry-item,
+.engine-panel,
+.tool-panel,
+.control-panel,
+.work-panel,
+.setting-row,
+.model-panel,
+.gate-panel,
+.chat-shell,
+.topbar,
+.composer,
+.composer-card,
+.history-popover,
+.thread-item,
+.panel,
+.image-node.empty-node,
+.prompt-smart-node,
+.loop-smart-node,
+.create-menu,
+.workflow-panel,
+.asset-panel,
+.shortcut-panel,
+.smart-log-panel {
+    border-color: var(--xq-line) !important;
+    box-shadow: var(--xq-shadow-sm) !important;
+    backdrop-filter: var(--xq-blur);
+    -webkit-backdrop-filter: var(--xq-blur);
+}
+
+input,
+textarea,
+select,
+.prompt-input,
+.nano-input {
+    border-color: var(--xq-line) !important;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.52);
+}
+input:focus,
+textarea:focus,
+select:focus,
+.prompt-input:focus,
+.nano-input:focus {
+    outline: none !important;
+    border-color: rgba(20,184,166,.45) !important;
+    box-shadow: 0 0 0 4px rgba(20,184,166,.12), inset 0 1px 0 rgba(255,255,255,.5) !important;
+}
+
+.shell,
+.board {
+    background-color: transparent !important;
+    background-image:
+        linear-gradient(rgba(148, 163, 184, .12) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(148, 163, 184, .12) 1px, transparent 1px),
+        radial-gradient(circle at 20% 16%, rgba(20,184,166,.10), transparent 30%),
+        radial-gradient(circle at 82% 10%, rgba(37,99,235,.09), transparent 30%) !important;
+    background-size: 28px 28px, 28px 28px, auto, auto !important;
+}
+html.theme-dark .shell,
+body.theme-dark .shell,
+html.studio-theme-dark .shell,
+body.studio-theme-dark .shell,
+html.theme-dark .board,
+body.theme-dark .board,
+html.studio-theme-dark .board,
+body.studio-theme-dark .board {
+    background-image:
+        linear-gradient(rgba(148, 163, 184, .10) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(148, 163, 184, .10) 1px, transparent 1px),
+        radial-gradient(circle at 20% 16%, rgba(45,212,191,.11), transparent 30%),
+        radial-gradient(circle at 82% 10%, rgba(96,165,250,.09), transparent 30%) !important;
+}
+
+.image-node.empty-node,
+.image-node.prompt-smart-node,
+.image-node.loop-smart-node,
+.node,
+.canvas-item,
+.asset-item,
+.storage-file-card {
+    transition: transform .18s var(--xq-ease), box-shadow .18s var(--xq-ease), border-color .18s var(--xq-ease), background .18s var(--xq-ease);
+}
+.image-node.empty-node:hover,
+.image-node.prompt-smart-node:hover,
+.image-node.loop-smart-node:hover,
+.node:hover,
+.canvas-item:hover,
+.asset-item:hover,
+.storage-file-card:hover {
+    transform: translateY(-1px);
+    box-shadow: var(--xq-shadow) !important;
+}
+
+.preview-modal,
+.image-edit-modal,
+.output-lightbox,
+.error-modal {
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+}
+.image-edit-panel,
+.preview-panel,
+.output-panel,
+.error-panel {
+    border: 1px solid var(--xq-line) !important;
+    border-radius: 24px !important;
+    box-shadow: var(--xq-shadow-lg) !important;
+}
+
+@media (max-width: 900px) {
+    .sidebar { margin: 10px 0 10px 10px; height: calc(100vh - 20px) !important; }
+    .stage { margin: 10px !important; border-radius: 22px !important; }
+    iframe { border-radius: 20px !important; }
+}
+.image-node.empty-node,
+.image-node.prompt-smart-node,
+.image-node.loop-smart-node,
+.node,
+.canvas-item,
+.asset-item,
+.storage-file-card {
+    transition: transform .18s var(--xq-ease), box-shadow .18s var(--xq-ease), border-color .18s var(--xq-ease), background .18s var(--xq-ease);
+}
+.image-node,
+.node {
+    contain: layout style paint;
+    content-visibility: auto;
+    contain-intrinsic-size: 260px 220px;
+}
+.image-node.group-node,
+.image-node.smart-group-node {
+    content-visibility: visible;
+}
+.canvas-page .node,
+.canvas-page .image-node {
+    contain: layout style paint;
+    content-visibility: auto;
+    contain-intrinsic-size: 260px 220px;
+}
+#world > .node,
+#world > .image-node {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+}
+
+/* Canvas nodes are positioned continuously during drag; keep geometry stable. */
+#world > .node, #world > .image-node {
+    contain: none !important;
+    content-visibility: visible !important;
+    contain-intrinsic-size: auto !important;
+    transition: none !important;
+}
+#world > .node:hover, #world > .image-node:hover { transform: none !important; }
+
+/* Performance mode for canvas pages: avoid full-screen blur and paint-heavy transitions while panning/dragging. */
+body:has(#world) .stage,
+body:has(#world) .sidebar,
+body:has(#world) .studio-modal,
+body:has(#world) .preview-modal,
+body:has(#world) .image-edit-modal,
+body:has(#world) .output-lightbox,
+body:has(#world) .error-modal {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+}
+body:has(#world) .node,
+body:has(#world) .image-node,
+body:has(#world) .canvas-item,
+body:has(#world) .asset-item {
+    transition: none !important;
+}
+body:has(#world) .node:hover,
+body:has(#world) .image-node:hover,
+body:has(#world) .canvas-item:hover,
+body:has(#world) .asset-item:hover {
+    transform: none !important;
+}
+.canvas-page .node,
+.canvas-page .image-node,
+.canvas-page .image-node.group-node,
+.canvas-page .image-node.prompt-smart-node,
+.canvas-page .image-node.loop-smart-node {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+}
