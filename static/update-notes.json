@@ -1,18 +1,18 @@
 {
-  "version": "2026.08.06.1",
-  "updated_at": "2026-08-06T13:27:01+08:00",
+  "version": "2026.08.07.1",
+  "updated_at": "2026-08-07T10:00:00+08:00",
   "items": [
     {
-      "type": "perf",
-      "text": "优化普通画布和智能画布的拖动、缩放流畅度，减少画布移动时的掉帧感。"
+      "type": "feature",
+      "text": "Added official MiniMax H3 workflow files for multi-reference video workflows."
     },
     {
-      "type": "perf",
-      "text": "降低画布页面大面积毛玻璃和节点动画带来的性能开销，多图场景下更轻快。"
+      "type": "feature",
+      "text": "Added MiniMax timeline video clip trimming and concatenation export endpoint."
     },
     {
-      "type": "perf",
-      "text": "普通画布高清图片切换改为拖动停稳后再处理，避免移动画布时频繁占用电脑资源。"
+      "type": "update",
+      "text": "Synchronized the official MiniMax H3 workflow configuration update."
     }
   ]
 }

@@ -162,20 +162,20 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 GLOBAL_LOOP = None
-APP_VERSION = "2026.06.03"
+APP_VERSION = "2026.08.07.1"
 GITHUB_REPO_URL = "https://github.com/hero8152/Infinite-Canvas"
 GITHUB_VERSION_URL = "https://raw.githubusercontent.com/hero8152/Infinite-Canvas/main/VERSION"
 GITHUB_TREE_URL = "https://api.github.com/repos/hero8152/Infinite-Canvas/git/trees/main?recursive=1"
 GITHUB_RAW_ROOT = "https://raw.githubusercontent.com/hero8152/Infinite-Canvas/main"
 GITHUB_UPDATE_NOTES_URL = GITHUB_RAW_ROOT + "/static/update-notes.json"
-MODELSCOPE_REPO_URL = "https://modelscope.ai/studios/daniel8152/Infinite-Canvas"
-MODELSCOPE_RAW_ROOT = "https://www.modelscope.ai/studios/daniel8152/Infinite-Canvas/raw/main"
+MODELSCOPE_REPO_URL = "https://modelscope.cn/studios/xtwlgzs/Infinite-Canvas"
+MODELSCOPE_RAW_ROOT = "https://www.modelscope.cn/studios/xtwlgzs/Infinite-Canvas/raw/main"
 # ModelScope 仓库默认分支为 master；raw 网页路径会返回 HTML，必须用仓库文件 API 才能拿到纯文本
-# 注意：.ai 站命名空间为小写 daniel8152，API 路径大小写敏感（推送/文件 API 用大写会 404/拒绝）
-MODELSCOPE_FILE_API_ROOT = "https://www.modelscope.ai/api/v1/studio/daniel8152/Infinite-Canvas/repo?Revision=master&FilePath="
+# 注意：API 路径大小写敏感，用户名必须和 ModelScope 空间路径一致。
+MODELSCOPE_FILE_API_ROOT = "https://www.modelscope.cn/api/v1/studio/xtwlgzs/Infinite-Canvas/repo?Revision=master&FilePath="
 MODELSCOPE_VERSION_URL = MODELSCOPE_FILE_API_ROOT + "VERSION"
 MODELSCOPE_UPDATE_NOTES_URL = MODELSCOPE_FILE_API_ROOT + "static/update-notes.json"
-MODELSCOPE_TREE_URL = "https://www.modelscope.ai/api/v1/studio/daniel8152/Infinite-Canvas/repo/files?Revision=master&Recursive=true"
+MODELSCOPE_TREE_URL = "https://www.modelscope.cn/api/v1/studio/xtwlgzs/Infinite-Canvas/repo/files?Revision=master&Recursive=true"
 
 @app.on_event("startup")
 async def startup_event():
@@ -2009,7 +2009,7 @@ def update_allowed_file(path: str) -> bool:
     path = str(path or "").replace("\\", "/").lstrip("/")
     if not path or any(part in {"", ".", ".."} for part in path.split("/")):
         return False
-    return path in {"main.py", "VERSION"} or path.startswith("static/")
+    return path in {"main.py", "VERSION", "project-config.json"} or path.startswith(("static/", "workflows/"))
 
 # 缓存 GitHub Tree API 响应（含 ETag），减少 60 次/h 限流压力
 GITHUB_TREE_CACHE: Dict[str, Any] = {"etag": "", "data": None, "expires_at": 0.0}
@@ -2142,7 +2142,9 @@ def modelscope_update_file_list() -> List[str]:
 def modelscope_file_bytes(rel: str) -> bytes:
     cfg = read_project_config()
     root = cfg.get("mirror_raw_root_url") or cfg.get("raw_root_url") or MODELSCOPE_FILE_API_ROOT
-    url = root.rstrip("/") + "/" + urllib.parse.quote(rel, safe="/")
+    root = root.rstrip("/")
+    sep = "" if root.endswith("FilePath=") else "/"
+    url = root + sep + urllib.parse.quote(rel, safe="/")
     resp = github_get(url, headers={"User-Agent": "Infinite-Canvas-Updater"}, timeout=60)
     return resp.content
 
@@ -3096,6 +3098,17 @@ class SmartCanvasGroupExportRequest(BaseModel):
     folder: str = ""
     group_name: str = "group"
     items: List[SmartCanvasGroupExportItem] = []
+
+class MiniMaxTimelineClip(BaseModel):
+    url: str = ""
+    name: str = ""
+    start: float = 0
+    end: float = 0
+    duration: float = 0
+
+class MiniMaxTimelineExportRequest(BaseModel):
+    clips: List[MiniMaxTimelineClip] = []
+    filename: str = "minimax-timeline.mp4"
 
 class LocalImageImportRequest(BaseModel):
     path: str = ""
@@ -16351,6 +16364,53 @@ def smart_group_export_folder(folder: str, group_name: str) -> str:
     os.makedirs(path, exist_ok=True)
     return path
 
+@app.post("/api/smart-canvas/minimax-export")
+async def export_minimax_timeline(payload: MiniMaxTimelineExportRequest):
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise HTTPException(status_code=500, detail="未找到 ffmpeg，无法导出完整剪辑")
+    clips = [clip for clip in (payload.clips or []) if clip.url]
+    if not clips:
+        raise HTTPException(status_code=400, detail="时间轴里还没有可导出的视频")
+    tmpdir = tempfile.mkdtemp(prefix="minimax_timeline_")
+    try:
+        sources = []
+        for clip in clips:
+            src = output_file_from_url(clip.url)
+            if not src or not os.path.isfile(src):
+                raise HTTPException(status_code=400, detail="完整剪辑导出只支持本地生成素材")
+            sources.append(src)
+        parts = []
+        video_filter = "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30"
+        for index, (clip, src) in enumerate(zip(clips, sources)):
+            start = max(0.0, float(clip.start or 0))
+            end = float(clip.end or 0)
+            duration = max(0.1, end - start) if end > start else max(0.1, float(clip.duration or 0) - start)
+            part = os.path.join(tmpdir, f"part_{index:03d}.mp4")
+            command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{start:.3f}", "-t", f"{duration:.3f}", "-i", src, "-vf", video_filter, "-an", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-movflags", "+faststart", part]
+            result = await asyncio.to_thread(subprocess.run, command, capture_output=True, text=True, timeout=300)
+            if result.returncode != 0:
+                raise HTTPException(status_code=500, detail=(result.stderr or "视频裁剪失败").strip()[:300])
+            parts.append(part)
+        filename = sanitize_export_filename(payload.filename or "minimax-timeline.mp4", "minimax-timeline.mp4")
+        if not filename.lower().endswith(".mp4"):
+            filename += ".mp4"
+        output_path = output_path_for(filename, "output")
+        if len(parts) == 1:
+            shutil.copyfile(parts[0], output_path)
+        else:
+            concat = os.path.join(tmpdir, "concat.txt")
+            with open(concat, "w", encoding="utf-8") as stream:
+                for part in parts:
+                    stream.write(f"file '{part.replace(chr(92), chr(47))}'\n")
+            command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", concat, "-c", "copy", "-movflags", "+faststart", output_path]
+            result = await asyncio.to_thread(subprocess.run, command, capture_output=True, text=True, timeout=300)
+            if result.returncode != 0:
+                raise HTTPException(status_code=500, detail=(result.stderr or "视频拼接失败").strip()[:300])
+        return {"url": output_url_for(filename, "output"), "name": filename, "kind": "video"}
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
 @app.post("/api/smart-canvas/group-export")
 async def export_smart_canvas_group(payload: SmartCanvasGroupExportRequest):
     target_dir = smart_group_export_folder(payload.folder, payload.group_name)
@@ -18890,6 +18950,7 @@ if __name__ == "__main__":
     # 客户端有自己的应用层心跳 + 断线重连兜底，这里禁用协议 ping 更稳。
     uvicorn.run(app, host="0.0.0.0", port=3011,
                 ws_ping_interval=None, ws_ping_timeout=None)
+
 
 
 
