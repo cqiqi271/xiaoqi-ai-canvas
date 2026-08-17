@@ -162,7 +162,7 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 GLOBAL_LOOP = None
-APP_VERSION = "2026.08.07.2"
+APP_VERSION = "2026.08.07.3"
 GITHUB_REPO_URL = "https://github.com/hero8152/Infinite-Canvas"
 GITHUB_VERSION_URL = "https://raw.githubusercontent.com/hero8152/Infinite-Canvas/main/VERSION"
 GITHUB_TREE_URL = "https://api.github.com/repos/hero8152/Infinite-Canvas/git/trees/main?recursive=1"
@@ -1342,6 +1342,7 @@ def normalize_provider(item):
         "video_models": video_models,
         "model_names": normalize_model_name_map(item.get("model_names")),
         "model_protocols": normalize_model_protocols(item.get("model_protocols")),
+        "model_prices": normalize_model_prices(item.get("model_prices")),
         "ms_loras": normalize_ms_loras(item.get("ms_loras") or []),
         "ms_defaults_version": int(item.get("ms_defaults_version") or 0),
         "rh_apps": normalize_runninghub_entries(item.get("rh_apps") or [], "app"),
@@ -2976,6 +2977,7 @@ class ApiProviderPayload(BaseModel):
     video_models: List[str] = []
     model_names: Dict[str, str] = {}
     model_protocols: Dict[str, str] = {}
+    model_prices: Dict[str, Dict[str, float]] = {}
     ms_loras: List[Dict[str, Any]] = []
     ms_defaults_version: int = 0
     rh_apps: List[Dict[str, Any]] = []
@@ -4715,6 +4717,289 @@ def normalize_model_name_map(value):
             if model and label and label != model:
                 normalized[model] = label
     return normalized
+
+def normalize_model_prices(value):
+    """规整每个模型的单次调用价格，统一按人民币保存。"""
+    normalized = {"image": {}, "chat": {}, "video": {}}
+    if not isinstance(value, dict):
+        return normalized
+    for kind in normalized:
+        source = value.get(kind)
+        if not isinstance(source, dict):
+            continue
+        for raw_model, raw_price in source.items():
+            model = str(raw_model or "").strip()
+            try:
+                price = float(raw_price)
+            except (TypeError, ValueError):
+                continue
+            if model and math.isfinite(price) and price >= 0:
+                normalized[kind][model] = round(price, 6)
+    return normalized
+
+def configured_generation_cost(provider, model, kind="image", count=1):
+    prices = normalize_model_prices((provider or {}).get("model_prices"))
+    price = prices.get(kind, {}).get(str(model or "").strip())
+    if price is None:
+        return None
+    count = max(1, int(count or 1))
+    return {
+        "amount": round(float(price) * count, 6),
+        "currency": "CNY",
+        "source": "estimated",
+        "unit": "request",
+        "unit_price": float(price),
+        "count": count,
+    }
+
+def reported_generation_cost(raw):
+    """只读取带明确币种的上游扣费字段，避免把 token 数误当金额。"""
+    cost_keys = ("total_cost", "cost", "charged_amount", "charge_amount", "amount_charged")
+    currency_keys = ("currency", "cost_currency", "billing_currency")
+    allowed_currency = {"CNY", "RMB", "CNH", "USD"}
+    seen = set()
+
+    def visit(value, depth=0):
+        if depth > 5:
+            return None
+        if isinstance(value, (dict, list, tuple)):
+            marker = id(value)
+            if marker in seen:
+                return None
+            seen.add(marker)
+        if isinstance(value, dict):
+            currency = next((str(value.get(key) or "").strip().upper() for key in currency_keys if value.get(key) is not None), "")
+            if currency == "¥":
+                currency = "CNY"
+            if currency in allowed_currency:
+                for key in cost_keys:
+                    if value.get(key) is None:
+                        continue
+                    try:
+                        amount = float(value.get(key))
+                    except (TypeError, ValueError):
+                        continue
+                    if math.isfinite(amount) and amount >= 0:
+                        return {"amount": round(amount, 6), "currency": currency, "source": "reported"}
+            preferred = ("usage", "billing", "cost", "data", "result", "meta", "metadata")
+            for key in preferred:
+                if key in value:
+                    found = visit(value.get(key), depth + 1)
+                    if found:
+                        return found
+            for child in value.values():
+                found = visit(child, depth + 1)
+                if found:
+                    return found
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                found = visit(child, depth + 1)
+                if found:
+                    return found
+        return None
+
+    return visit(raw)
+
+def generation_cost_for_results(raw_items, provider, model, kind="image", count=1):
+    reported = [reported_generation_cost(raw) for raw in (raw_items or [])]
+    reported = [item for item in reported if item]
+    if reported and len({item["currency"] for item in reported}) == 1:
+        return {
+            "amount": round(sum(float(item["amount"]) for item in reported), 6),
+            "currency": reported[0]["currency"],
+            "source": "reported",
+            "count": len(reported),
+        }
+    return configured_generation_cost(provider, model, kind, count)
+
+def attach_generation_cost(result, provider, model, kind="image", count=1):
+    """Attach cost metadata without changing the provider-specific response shape."""
+    if not isinstance(result, dict):
+        return result
+    raw = result.get("raw") if result.get("raw") is not None else result
+    cost = generation_cost_for_results([raw], provider, model, kind, count)
+    if cost:
+        result["generation_cost"] = cost
+    return result
+
+AUTO_BILLING_GROUPS = {}
+AUTO_BILLING_SUPPORT_CACHE = {}
+AUTO_BILLING_STATUS_CACHE = {}
+AUTO_BILLING_CACHE_SECONDS = 300
+
+def provider_billing_root_candidates(provider):
+    base = str((provider or {}).get("base_url") or "").strip().rstrip("/")
+    if not base.startswith(("http://", "https://")):
+        return []
+    parsed = urllib.parse.urlparse(base)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    roots = [base]
+    if base.lower().endswith("/v1"):
+        roots.append(base[:-3].rstrip("/"))
+    roots.append(origin)
+    return list(dict.fromkeys(root for root in roots if root))
+
+def provider_auto_billing_group(provider):
+    provider_id = str((provider or {}).get("id") or (provider or {}).get("base_url") or "default")
+    group = AUTO_BILLING_GROUPS.get(provider_id)
+    if group is None:
+        group = {"lock": asyncio.Lock(), "active": 0, "before": None, "members": []}
+        AUTO_BILLING_GROUPS[provider_id] = group
+    return group
+
+def billing_currency_from_status(status):
+    symbol = str((status or {}).get("custom_currency_symbol") or "").strip().upper()
+    if symbol in {"¥", "￥", "RMB", "CNY", "CNH"} or "¥" in symbol or "￥" in symbol:
+        return "CNY"
+    if symbol in {"$", "USD", "US$"}:
+        return "USD"
+    return "CNY" if (status or {}).get("display_in_currency") else "USD"
+
+async def provider_billing_status(client, root):
+    now = time.monotonic()
+    cached = AUTO_BILLING_STATUS_CACHE.get(root)
+    if cached and cached[0] > now:
+        return cached[1]
+    status = {}
+    try:
+        response = await client.get(f"{root}/api/status")
+        if response.status_code == 200:
+            payload = response.json()
+            status = payload.get("data") if isinstance(payload, dict) and isinstance(payload.get("data"), dict) else payload
+            if not isinstance(status, dict):
+                status = {}
+    except Exception:
+        status = {}
+    AUTO_BILLING_STATUS_CACHE[root] = (now + AUTO_BILLING_CACHE_SECONDS, status)
+    return status
+
+async def provider_billing_snapshot(provider, force=False):
+    """Read OpenAI-dashboard compatible cumulative usage without making a model call."""
+    roots = provider_billing_root_candidates(provider)
+    provider_id = str((provider or {}).get("id") or "")
+    if provider_id in {"modelscope", "runninghub", "volcengine", "jimeng", "codex", "gemini-cli"}:
+        return None
+    if provider_protocol(provider) != "openai":
+        return None
+    if not roots or not provider_env_key_value(provider_id):
+        return None
+    provider_id = provider_id or roots[0]
+    now = time.monotonic()
+    cached_support = AUTO_BILLING_SUPPORT_CACHE.get(provider_id)
+    if not force and cached_support and cached_support[0] > now and cached_support[1] is False:
+        return None
+    today = datetime.date.today()
+    start_date = today - datetime.timedelta(days=1)
+    end_date = today + datetime.timedelta(days=1)
+    headers = api_headers(provider=provider)
+    timeout = httpx.Timeout(connect=5.0, read=8.0, write=5.0, pool=5.0)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        for root in roots:
+            for prefix in ("/v1/dashboard/billing/usage", "/dashboard/billing/usage"):
+                try:
+                    response = await client.get(
+                        f"{root}{prefix}",
+                        headers=headers,
+                        params={"start_date": start_date.isoformat(), "end_date": end_date.isoformat()},
+                    )
+                    if response.status_code != 200:
+                        continue
+                    payload = response.json()
+                    total_minor = float(payload.get("total_usage")) if isinstance(payload, dict) else math.nan
+                    if not math.isfinite(total_minor) or total_minor < 0:
+                        continue
+                    status = await provider_billing_status(client, root)
+                    AUTO_BILLING_SUPPORT_CACHE[provider_id] = (now + AUTO_BILLING_CACHE_SECONDS, True)
+                    return {
+                        "total_minor": total_minor,
+                        "currency": billing_currency_from_status(status),
+                        "minor_scale": 100.0,
+                    }
+                except Exception:
+                    continue
+    AUTO_BILLING_SUPPORT_CACHE[provider_id] = (now + AUTO_BILLING_CACHE_SECONDS, False)
+    return None
+
+async def finalize_automatic_billing_group(provider, group):
+    members = list(group.get("members") or [])
+    before = group.get("before")
+    group["active"] = 0
+    group["before"] = None
+    group["members"] = []
+    if not members:
+        return
+
+    automatic_total = None
+    if before:
+        after = None
+        # Some compatible billing dashboards update a moment after the result is returned.
+        for delay in (0.0, 0.8, 1.5, 2.5):
+            if delay:
+                await asyncio.sleep(delay)
+            after = await provider_billing_snapshot(provider, force=True)
+            if after and after.get("currency") == before.get("currency"):
+                if float(after.get("total_minor") or 0) > float(before.get("total_minor") or 0) + 1e-9:
+                    break
+        if after and after.get("currency") == before.get("currency"):
+            delta_minor = float(after.get("total_minor") or 0) - float(before.get("total_minor") or 0)
+            if delta_minor > 1e-9:
+                automatic_total = {
+                    "amount": max(0.0, delta_minor / float(after.get("minor_scale") or 100.0)),
+                    "currency": after.get("currency") or "CNY",
+                }
+
+    unresolved = [member for member in members if not member.get("reported")]
+    remaining_amount = float((automatic_total or {}).get("amount") or 0)
+    if automatic_total:
+        for member in members:
+            reported = member.get("reported")
+            if reported and reported.get("currency") == automatic_total.get("currency"):
+                remaining_amount = max(0.0, remaining_amount - float(reported.get("amount") or 0))
+    total_weight = sum(max(0.000001, float(member.get("weight") or 1)) for member in unresolved)
+    for member in members:
+        cost = member.get("reported")
+        if not cost and automatic_total and unresolved and remaining_amount > 0:
+            share = max(0.000001, float(member.get("weight") or 1)) / total_weight
+            cost = {
+                "amount": round(remaining_amount * share, 6),
+                "currency": automatic_total.get("currency") or "CNY",
+                "source": "reported",
+                "method": "billing_delta",
+                "count": 1,
+            }
+        future = member.get("future")
+        if future and not future.done():
+            future.set_result(cost)
+
+async def run_with_automatic_billing(provider, operation, weight=1.0):
+    """Calculate real charges while keeping simultaneous generations concurrent."""
+    group = provider_auto_billing_group(provider)
+    loop = asyncio.get_running_loop()
+    member = {"future": loop.create_future(), "reported": None, "weight": max(0.000001, float(weight or 1))}
+    async with group["lock"]:
+        if int(group.get("active") or 0) == 0:
+            group["before"] = await provider_billing_snapshot(provider)
+            group["members"] = []
+        group["active"] = int(group.get("active") or 0) + 1
+        group["members"].append(member)
+    try:
+        result = await operation()
+        member["reported"] = reported_generation_cost(result)
+        if member["reported"]:
+            member["reported"]["count"] = 1
+    except Exception:
+        async with group["lock"]:
+            group["active"] = max(0, int(group.get("active") or 0) - 1)
+            group["members"] = [item for item in group.get("members", []) if item is not member]
+            if group["active"] == 0:
+                await finalize_automatic_billing_group(provider, group)
+        raise
+    async with group["lock"]:
+        group["active"] = max(0, int(group.get("active") or 0) - 1)
+        if group["active"] == 0:
+            await finalize_automatic_billing_group(provider, group)
+    automatic_cost = await member["future"]
+    return result, automatic_cost
 
 def effective_protocol(provider, model=""):
     """返回某模型实际生效的协议：优先单模型覆盖，否则用平台全局协议。"""
@@ -13890,8 +14175,11 @@ async def build_online_image_result(payload: OnlineImageRequest):
                 local_urls.append(local_url)
                 local_items.append(image_output_meta(local_url, item))
         return local_urls, local_items, raw_item
+    async def generate_batch():
+        return await asyncio.gather(*(generate_one() for _ in range(count)))
+
     try:
-        generated = await asyncio.gather(*(generate_one() for _ in range(count)))
+        generated, automatic_cost = await run_with_automatic_billing(provider, generate_batch, weight=count)
     except httpx.HTTPStatusError as exc:
         log_net_error(f"生图 HTTP状态错误 provider={provider.get('id')} model={model} size={request_size}", exc)
         text = exc.response.text or ''
@@ -13905,6 +14193,9 @@ async def build_online_image_result(payload: OnlineImageRequest):
     local_urls = [url for urls, _items, _raw in generated for url in (urls or []) if url]
     local_items = [item for _urls, items, _raw in generated for item in (items or []) if item.get("url")]
     raw = generated[0][2] if generated else {}
+    generation_cost = automatic_cost or generation_cost_for_results(
+        [item[2] for item in generated], provider, model, "image", count
+    )
     if not local_urls:
         provider_name = provider.get("name") or provider["id"]
         raw_text = json.dumps(raw, ensure_ascii=False)[:800] if isinstance(raw, (dict, list)) else str(raw)[:800]
@@ -13922,6 +14213,7 @@ async def build_online_image_result(payload: OnlineImageRequest):
         "request_id": raw.get("id") if isinstance(raw, dict) else None,
         "params": {"provider_id": provider["id"], "model": model, "size": request_size, "requested_size": payload.size, "quality": payload.quality, "n": count, "reference_images": refs},
         "raw_usage": raw.get("usage") if isinstance(raw, dict) else None,
+        "generation_cost": generation_cost,
     }
     save_to_history(result)
     if GLOBAL_LOOP:
@@ -15369,11 +15661,23 @@ def volcengine_video_prompt_text(prompt, aspect_ratio="", duration=None):
 @app.post("/api/canvas-video")
 async def canvas_video(payload: CanvasVideoRequest):
     provider = get_api_provider(payload.provider_id)
+
+    async def operation():
+        return await canvas_video_impl(payload, provider)
+
+    result, automatic_cost = await run_with_automatic_billing(provider, operation)
+    if automatic_cost and isinstance(result, dict):
+        result["generation_cost"] = automatic_cost
+    return result
+
+async def canvas_video_impl(payload: CanvasVideoRequest, provider):
     if is_jimeng_provider(provider):
-        return await generate_jimeng_video(payload, provider)
+        result = await generate_jimeng_video(payload, provider)
+        return attach_generation_cost(result, provider, payload.model, "video")
     if is_runninghub_provider(provider):
         try:
-            return await generate_runninghub_video(payload, provider)
+            result = await generate_runninghub_video(payload, provider)
+            return attach_generation_cost(result, provider, payload.model, "video")
         except HTTPException as exc:
             print(f"RunningHub 视频生成失败 model={payload.model}: {exc.detail}")
             raise
@@ -15402,8 +15706,10 @@ async def canvas_video(payload: CanvasVideoRequest):
         try:
             async with httpx.AsyncClient(timeout=VIDEO_POLL_TIMEOUT) as tudou_client:
                 if is_tudou_grok_video_model(requested_model):
-                    return await generate_tudou_grok_video(tudou_client, payload, provider, base_url, requested_model)
-                return await generate_tudou_video(tudou_client, payload, provider, base_url, requested_model)
+                    result = await generate_tudou_grok_video(tudou_client, payload, provider, base_url, requested_model)
+                else:
+                    result = await generate_tudou_video(tudou_client, payload, provider, base_url, requested_model)
+                return attach_generation_cost(result, provider, requested_model, "video")
         except httpx.HTTPStatusError as exc:
             text = exc.response.text
             friendly = friendly_video_error_detail(text, requested_model, provider)
@@ -15415,7 +15721,8 @@ async def canvas_video(payload: CanvasVideoRequest):
     if is_agnes:
         try:
             async with httpx.AsyncClient(timeout=VIDEO_POLL_TIMEOUT) as agnes_client:
-                return await generate_agnes_video(agnes_client, payload, provider, base_url, requested_model)
+                result = await generate_agnes_video(agnes_client, payload, provider, base_url, requested_model)
+                return attach_generation_cost(result, provider, requested_model, "video")
         except httpx.HTTPStatusError as exc:
             text = exc.response.text
             raise HTTPException(status_code=exc.response.status_code, detail=f"Agnes 视频接口错误：{text}") from exc
@@ -15425,7 +15732,8 @@ async def canvas_video(payload: CanvasVideoRequest):
     if is_lingjing:
         try:
             async with httpx.AsyncClient(timeout=VIDEO_POLL_TIMEOUT) as lingjing_client:
-                return await generate_lingjing_openai_video(lingjing_client, payload, provider, base_url, requested_model)
+                result = await generate_lingjing_openai_video(lingjing_client, payload, provider, base_url, requested_model)
+                return attach_generation_cost(result, provider, requested_model, "video")
         except httpx.HTTPStatusError as exc:
             text = exc.response.text
             raise HTTPException(status_code=exc.response.status_code, detail=f"灵境 API 视频接口错误：{text}") from exc
@@ -15437,7 +15745,8 @@ async def canvas_video(payload: CanvasVideoRequest):
     if is_yuli and yuli_is_veo_openai_model(requested_model):
         try:
             async with httpx.AsyncClient(timeout=VIDEO_POLL_TIMEOUT) as yuli_client:
-                return await generate_yuli_openai_video(yuli_client, payload, provider, base_url, requested_model)
+                result = await generate_yuli_openai_video(yuli_client, payload, provider, base_url, requested_model)
+                return attach_generation_cost(result, provider, requested_model, "video")
         except httpx.HTTPStatusError as exc:
             text = exc.response.text
             raise HTTPException(status_code=exc.response.status_code, detail=f"上游视频接口错误：{text}") from exc
@@ -15780,7 +16089,8 @@ async def canvas_video(payload: CanvasVideoRequest):
             if not urls:
                 raise HTTPException(status_code=502, detail=f"视频生成成功但没有返回视频：{result}")
             local_urls = [await save_remote_video_to_output(url) for url in urls]
-            return {"videos": local_urls, "task_id": task_id, "raw": result}
+            response_result = {"videos": local_urls, "task_id": task_id, "raw": result}
+            return attach_generation_cost(response_result, provider, body.get("model") or requested_model, "video")
     except httpx.HTTPStatusError as exc:
         text = exc.response.text
         try:
@@ -15847,16 +16157,28 @@ async def canvas_video(payload: CanvasVideoRequest):
 @app.post("/api/canvas-llm")
 async def canvas_llm(payload: CanvasLLMRequest):
     _provider = get_api_provider(payload.provider)
+
+    async def operation():
+        return await canvas_llm_impl(payload, _provider)
+
+    result, automatic_cost = await run_with_automatic_billing(_provider, operation)
+    if automatic_cost and isinstance(result, dict):
+        result["generation_cost"] = automatic_cost
+    return result
+
+async def canvas_llm_impl(payload: CanvasLLMRequest, _provider):
     if is_codex_provider(_provider):
         model = selected_model(payload.model, (_provider.get("chat_models") or CODEX_DEFAULT_CHAT_MODELS)[0])
         payload.model = model
         text, raw = await codex_chat_text(payload, payload.messages)
-        return {"text": text, "model": model, "raw_usage": None, "raw": raw}
+        result = {"text": text, "model": model, "raw_usage": None, "raw": raw}
+        return attach_generation_cost(result, _provider, model, "chat")
     if is_gemini_cli_provider(_provider):
         model = selected_model(payload.model, (_provider.get("chat_models") or GEMINI_CLI_DEFAULT_CHAT_MODELS)[0])
         payload.model = model
         text, raw = await gemini_cli_chat_text(payload, payload.messages)
-        return {"text": text, "model": model, "raw_usage": None, "raw": raw}
+        result = {"text": text, "model": model, "raw_usage": None, "raw": raw}
+        return attach_generation_cost(result, _provider, model, "chat")
     chat_base, chat_hdrs, model = resolve_chat_provider(payload.provider, payload.model, payload.ms_model)
     # 判断协议：APIMart 异步 vs 标准 OpenAI
     _llm_provider = get_api_provider(payload.provider) if payload.provider not in ("modelscope",) else {}
@@ -15933,7 +16255,11 @@ async def canvas_llm(payload: CanvasLLMRequest):
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"解析回复内容失败：{exc}") from exc
     raw_data = unwrap_apimart_response(raw) if isinstance(raw, dict) else {}
-    return {"text": text, "model": model, "raw_usage": raw_data.get("usage")}
+    result = {"text": text, "model": model, "raw_usage": raw_data.get("usage")}
+    generation_cost = generation_cost_for_results([raw_data], _llm_provider, model, "chat", 1)
+    if generation_cost:
+        result["generation_cost"] = generation_cost
+    return result
 
 # --- 对话管理 ---
 

@@ -1228,11 +1228,19 @@ function clearPromptInput(options={}){
     }
 }
 function applyTheme(theme){
-    const dark = theme === 'dark';
+    const next = theme === 'dark' || theme === 'future' ? 'future' : (theme === 'apple' ? 'apple' : 'pro');
+    const dark = next === 'future';
+    const variants = ['studio-theme-pro', 'studio-theme-apple', 'studio-theme-future'];
     document.documentElement.classList.toggle('theme-dark', dark);
     document.documentElement.classList.toggle('studio-theme-dark', dark);
+    variants.forEach(name => document.documentElement.classList.remove(name));
+    document.documentElement.classList.add(`studio-theme-${next}`);
     document.body?.classList.toggle('theme-dark', dark);
     document.body?.classList.toggle('studio-theme-dark', dark);
+    if(document.body){
+        variants.forEach(name => document.body.classList.remove(name));
+        document.body.classList.add(`studio-theme-${next}`);
+    }
 }
 function toast(text){
     const el = document.getElementById('toast');
@@ -6858,6 +6866,7 @@ function restoreMediaPlaybackStates(states){
 function smartRunTaskLabel(run){
     const s = run?.settings || {};
     if(s.engine === 'runninghub') return s.rhTaskLabel || s.rhWorkflowTitle || s.rhAppTitle || s.rhWorkflowId || s.rhAppId || 'RunningHub';
+    if(run?.kind === 'chat') return s.model || 'LLM';
     if(run?.kind === 'video') return s.videoModel || 'Video';
     if(s.engine === 'comfy'){
         if(s.comfyMode === 'custom') return s.comfyWorkflow || 'ComfyUI';
@@ -7008,6 +7017,7 @@ function smartRunPlatformLabel(run){
     if(s.engine === 'comfy') return 'ComfyUI';
     if(s.engine === 'runninghub') return 'RunningHub';
     if(s.engine === 'modelscope') return 'Modelscope';
+    if(run?.kind === 'chat') return apiProviderById(s.provider_id || '')?.name || s.provider_id || 'LLM';
     if(run?.kind === 'video') return videoProviderById(s.videoProvider || '')?.name || s.videoProvider || 'Video';
     return apiProviderById(s.provider_id || '')?.name || s.provider_id || 'API';
 }
@@ -7025,6 +7035,7 @@ function smartRunRequestMeta(run){
         refs:s.refCount || 0
     };
     if(s.engine === 'modelscope') return {backend:'Modelscope', model:s.msgenModel || '', custom_model:s.msCustomModel || ''};
+    if(run?.kind === 'chat') return {provider_id:s.provider_id || '', model:s.model || ''};
     if(run?.kind === 'video') return {provider_id:s.videoProvider || '', model:s.videoModel || '', duration:s.videoDuration || '', aspect_ratio:s.videoAspect || '', resolution:s.videoResolution || ''};
     return {provider_id:s.provider_id || '', model:s.model || '', size:run?.size || '', quality:s.quality || '', n:s.count || 1};
 }
@@ -7039,6 +7050,119 @@ function smartRunSnapshot(node, prompt, refs=[], kind='image'){
         refs:(refs || []).map(ref => ({url:ref.url || '', name:ref.name || 'image', kind:ref.kind || ''})).filter(ref => ref.url),
         size: kind === 'image' && isApiLikeEngine(settingsSnapshot.engine) ? sizeForRun(settingsSnapshot) : ''
     };
+}
+function normalizeSmartGenerationCost(value){
+    if(!value || typeof value !== 'object') return null;
+    const amount = Number(value.amount);
+    if(!Number.isFinite(amount) || amount < 0) return null;
+    return {
+        amount,
+        currency:String(value.currency || 'CNY').toUpperCase(),
+        source:value.source === 'reported' ? 'reported' : 'estimated',
+        count:Math.max(1, Number(value.count || 1)),
+        unit_price:Number.isFinite(Number(value.unit_price)) ? Number(value.unit_price) : undefined
+    };
+}
+function mergeSmartGenerationCost(current, addition){
+    const left = normalizeSmartGenerationCost(current);
+    const right = normalizeSmartGenerationCost(addition);
+    if(!right) return left;
+    if(!left) return right;
+    if(left.currency !== right.currency) return left;
+    return {
+        amount:left.amount + right.amount,
+        currency:left.currency,
+        source:left.source === 'reported' && right.source === 'reported' ? 'reported' : 'estimated',
+        count:Number(left.count || 1) + Number(right.count || 1)
+    };
+}
+function formatSmartGenerationCost(cost, options={}){
+    const item = normalizeSmartGenerationCost(cost);
+    if(!item) return '';
+    const symbol = ['CNY','RMB','CNH'].includes(item.currency) ? '¥' : item.currency === 'USD' ? '$' : `${item.currency} `;
+    const digits = item.amount >= 1 ? 2 : item.amount >= 0.01 ? 3 : 4;
+    const prefix = item.source === 'reported' ? '' : (options.compact ? '约' : '估算 ');
+    return `${prefix}${symbol}${item.amount.toFixed(digits)}`;
+}
+function smartCostPeriodStart(period='today'){
+    const now = new Date();
+    if(period === 'today') return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    if(period === '7d'){
+        const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        start.setDate(start.getDate() - 6);
+        return start.getTime();
+    }
+    if(period === 'month') return new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+    return 0;
+}
+function smartCostLogs(period='today'){
+    const start = smartCostPeriodStart(period);
+    return (canvas?.logs || []).filter(log => {
+        if(log?.status !== 'success') return false;
+        const createdAt = Number(log.createdAt || 0);
+        return !start || (createdAt >= start && createdAt <= Date.now());
+    });
+}
+function smartCanvasCostTotals(logs=smartCostLogs('all'), source='all'){
+    const totals = {};
+    (logs || []).forEach(log => {
+        const cost = normalizeSmartGenerationCost(log.generationCost || log.request?.generation_cost);
+        if(!cost || (source !== 'all' && cost.source !== source)) return;
+        totals[cost.currency] = (totals[cost.currency] || 0) + cost.amount;
+    });
+    return totals;
+}
+function smartFormatCostTotals(totals, empty='—'){
+    const parts = Object.entries(totals || {}).map(([currency, amount]) => formatSmartGenerationCost({amount, currency, source:'reported'}));
+    return parts.length ? parts.join(' + ') : empty;
+}
+function smartRenderCostStats(period='today'){
+    const logs = smartCostLogs(period);
+    const total = document.getElementById('smartCostTotal');
+    const reported = document.getElementById('smartCostReported');
+    const estimated = document.getElementById('smartCostEstimated');
+    const count = document.getElementById('smartCostCount');
+    if(total) total.textContent = smartFormatCostTotals(smartCanvasCostTotals(logs));
+    if(reported) reported.textContent = smartFormatCostTotals(smartCanvasCostTotals(logs, 'reported'));
+    if(estimated) estimated.textContent = smartFormatCostTotals(smartCanvasCostTotals(logs, 'estimated'));
+    if(count) count.textContent = `${logs.length} 次`;
+    document.querySelectorAll('[data-smart-cost-period]').forEach(btn => {
+        const active = btn.dataset.smartCostPeriod === period;
+        btn.classList.toggle('active', active);
+        btn.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+}
+function initSmartCostStats(){
+    const summary = document.getElementById('smartCostSummary');
+    const popover = document.getElementById('smartCostPopover');
+    if(!summary || !popover || summary.dataset.bound === '1') return;
+    summary.dataset.bound = '1';
+    let period = 'today';
+    const close = () => { popover.hidden = true; summary.setAttribute('aria-expanded', 'false'); };
+    summary.addEventListener('click', event => {
+        event.stopPropagation();
+        popover.hidden = !popover.hidden;
+        summary.setAttribute('aria-expanded', popover.hidden ? 'false' : 'true');
+        if(!popover.hidden) smartRenderCostStats(period);
+    });
+    document.getElementById('smartCostPopoverClose')?.addEventListener('click', close);
+    popover.addEventListener('click', event => event.stopPropagation());
+    document.querySelectorAll('[data-smart-cost-period]').forEach(btn => btn.addEventListener('click', () => {
+        period = btn.dataset.smartCostPeriod || 'today';
+        smartRenderCostStats(period);
+    }));
+    document.addEventListener('click', close);
+    document.addEventListener('keydown', event => { if(event.key === 'Escape') close(); });
+}
+function refreshSmartCostSummary(){
+    const el = document.getElementById('smartCostSummary');
+    if(!el) return;
+    const logs = smartCostLogs('today');
+    const parts = smartFormatCostTotals(smartCanvasCostTotals(logs), '¥0.00');
+    el.textContent = `今日 ${parts} · ${logs.length}次`;
+    el.title = '点击查看今日、近7天、本月和全部费用统计';
+    initSmartCostStats();
+    smartRenderCostStats(document.querySelector('[data-smart-cost-period].active')?.dataset.smartCostPeriod || 'today');
 }
 function addSmartGenerationLog({run, outputs=[], runMs=0, error=''}) {
     if(!canvas) return;
@@ -7068,6 +7192,7 @@ function addSmartGenerationLog({run, outputs=[], runMs=0, error=''}) {
         outputs:outputItems,
         refs:run?.refs || [],
         runMs:Number(runMs || 0),
+        generationCost:error ? null : normalizeSmartGenerationCost(run?.generationCost),
         error:error ? String(error) : ''
     };
     canvas.logs = [entry, ...canvas.logs].slice(0, 500);
@@ -7183,6 +7308,7 @@ function renderSmartCanvasLog(){
                     <span class="log-chip">${escapeHtml(log.platform || '-')}</span>
                     ${log.model ? `<span class="log-chip">${escapeHtml(log.model)}</span>` : ''}
                     <span class="log-chip">${escapeHtml(formatRunDuration(log.runMs || 0))}</span>
+                    ${log.generationCost ? `<span class="log-chip cost-chip" title="${log.generationCost.source === 'reported' ? '上游返回的实际费用' : '按 API 设置中的模型单价估算'}">${escapeHtml(formatSmartGenerationCost(log.generationCost))}</span>` : ''}
                 </div>
                 <div class="log-subline">${subParts.map(part => `<span title="${escapeAttr(part)}">${escapeHtml(part)}</span>`).join('')}</div>
                 ${log.error ? `<div class="log-error" title="${escapeAttr(log.error)}" data-error="${escapeAttr(log.error)}">${escapeHtml(log.error)}</div>` : ''}
@@ -8356,6 +8482,11 @@ function runTimePillHtml(node){
     const cls = running ? '' : ' done';
     return `<span class="run-time-pill${cls}" data-run-timer="${escapeHtml(node.id)}">${formatRunDuration(nodeRunElapsedMs(node))}</span>`;
 }
+function runCostPillHtml(node){
+    const cost = normalizeSmartGenerationCost(node?.generationCost);
+    if(!cost) return '';
+    return `<span class="run-cost-pill ${cost.source === 'reported' ? 'reported' : 'estimated'}" title="${cost.source === 'reported' ? '上游返回的实际费用' : '按模型单价估算'}">${escapeHtml(formatSmartGenerationCost(cost, {compact:true}))}</span>`;
+}
 function hideRunTimerForNode(node){
     if(!node || node.runTimerHidden || node.pending || node.running || node.jimengPending || !node.runFinishedAt) return false;
     node.runTimerHidden = true;
@@ -8431,7 +8562,7 @@ function render(){
             <div class="node-head"><div class="node-title">${title}</div><div class="node-actions">${deleteBtn}</div></div>
             ${!isEmpty && !isGroup && !isMinimax ? `<div class="floating-node-actions"><button class="mini-x node-delete" type="button" title="${escapeHtml(tr('smart.deleteNode'))}"><i data-lucide="trash-2"></i></button></div>` : ''}
             ${smartNodeToolbarHtml(node)}${smartGroupToolbarHtml(node)}
-            ${runTimePillHtml(node)}
+            ${runTimePillHtml(node)}${runCostPillHtml(node)}
             <div class="node-body">${body}</div>
             ${isCompactMember && (isPrompt || isLoop) ? '<div class="smart-group-member-grab" title="拖动移出分组"></div>' : ''}
             <div class="node-hint">${hint}</div>
@@ -8478,6 +8609,7 @@ function render(){
     syncSmartSelectedImageResolution(world);
     measureSmartNodeImages();
     refreshRunTimerPills();
+    refreshSmartCostSummary();
     return;
     world.innerHTML = '';
     if(composerEl) world.appendChild(composerEl);
@@ -15453,13 +15585,15 @@ async function generateUrlsForCurrentSettings(node, prompt, refs, runSettings=se
         if(taskIds.length){
             const settled = await Promise.all(taskIds.map(taskId => pollSmartCanvasTask(taskId)));
             const urls = settled.flatMap(result => resultMediaUrls(result?.image_items?.length ? result.image_items : (result?.images?.length ? result.images : result))).filter(Boolean);
-            return {urls, kind:mediaKindForUrls(urls, 'image')};
+            const generationCost = settled.reduce((total, result) => mergeSmartGenerationCost(total, result?.generation_cost), null);
+            return {urls, kind:mediaKindForUrls(urls, 'image'), generationCost};
         }
         const urls = resultMediaUrls(taskResult);
-        return {urls, kind:mediaKindForUrls(urls, 'image')};
+        return {urls, kind:mediaKindForUrls(urls, 'image'), generationCost:normalizeSmartGenerationCost(taskResult?.generation_cost)};
     }
     if(isApiLikeEngine(activeSettings.engine) && activeSettings.apiKind === 'video'){
-        return {urls:await runApiVideoGeneration(prompt, refs, activeSettings), kind:'video'};
+        const videoResult = await runApiVideoGeneration(prompt, refs, activeSettings);
+        return {urls:videoResult.urls, kind:'video', generationCost:videoResult.generationCost};
     }
     if(isApiLikeEngine(activeSettings.engine)){
         const taskResult = await runApiGeneration(prompt, refs, activeSettings);
@@ -15467,10 +15601,11 @@ async function generateUrlsForCurrentSettings(node, prompt, refs, runSettings=se
         if(taskIds.length){
             const settled = await Promise.all(taskIds.map(taskId => pollSmartCanvasTask(taskId)));
             const urls = settled.flatMap(result => resultMediaUrls(result?.image_items?.length ? result.image_items : (result?.images?.length ? result.images : result))).filter(Boolean);
-            return {urls, kind:mediaKindForUrls(urls, 'image')};
+            const generationCost = settled.reduce((total, result) => mergeSmartGenerationCost(total, result?.generation_cost), null);
+            return {urls, kind:mediaKindForUrls(urls, 'image'), generationCost};
         }
         const urls = resultMediaUrls(taskResult);
-        return {urls, kind:mediaKindForUrls(urls, 'image')};
+        return {urls, kind:mediaKindForUrls(urls, 'image'), generationCost:normalizeSmartGenerationCost(taskResult?.generation_cost)};
     }
     const urls = activeSettings.engine === 'runninghub'
         ? await runRunningHubGeneration(prompt, refs, activeSettings)
@@ -15597,7 +15732,8 @@ async function runCascadeStepIntoNode(sourceNode, targetNode, inputRefs, ctx=sma
         const result = await generateUrlsForCurrentSettings(outputNode, prompt, request.refs || [], runSettings);
         if(!result.urls?.length) throw new Error(result.kind === 'video' ? tr('smart.errNoOutVideos') : tr('smart.errNoOutImages'));
         if(outpaintSize) delete requestNode.outpaintSize;
-        addSmartGenerationLog({run:{...runLog, kind:result.kind || logKind}, outputs:result.urls, runMs:nowMs() - runLogStart});
+        outputNode.generationCost = normalizeSmartGenerationCost(result.generationCost);
+        addSmartGenerationLog({run:{...runLog, kind:result.kind || logKind, generationCost:result.generationCost}, outputs:result.urls, runMs:nowMs() - runLogStart});
         const ext = result.kind === 'video' ? 'mp4' : result.kind === 'audio' ? 'mp3' : result.kind === 'text' ? 'txt' : 'png';
         const additions = result.urls.map((item, i) => {
             const url = typeof item === 'string' ? item : item?.url || '';
@@ -15732,7 +15868,8 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
             runPath.states[edgeKey] = 'done';
             scheduleConnectionLayerRefresh();
         }
-        addSmartGenerationLog({run:{...runLog, kind:result.kind || logKind}, outputs:result.urls, runMs:nowMs() - runLogStart});
+        if(result.generationCost) outputSlot.generationCost = normalizeSmartGenerationCost(result.generationCost);
+        addSmartGenerationLog({run:{...runLog, kind:result.kind || logKind, generationCost:result.generationCost || outputSlot.generationCost}, outputs:result.urls, runMs:nowMs() - runLogStart});
         return rememberRoundOutputs(ctx, outputSlot, additions);
     } catch(e) {
         if(handleJimengPendingSignal(outputSlot, e)){
@@ -16098,6 +16235,7 @@ async function runGeneration(){
     if(shouldCreateBranchOutput) branchNode = createPendingOutputFromSource(node, expectedCount, pendingMeta, {connectSource:false, selectOutput:true, refs});
     undoSuppressed = false;
     const pendingNode = branchNode || node;
+    delete pendingNode.generationCost;
     if(extracted) pendingNode._runMetaTargetId = extracted.id;
     if(!branchNode){
         pendingNode.pending = Math.max(1, Number(expectedCount) || 1);
@@ -16127,8 +16265,11 @@ async function runGeneration(){
             return;
         }
         if(isApiLikeEngine(settings.engine) && settings.apiKind === 'video'){
-            const outVideos = await runApiVideoGeneration(prompt, refs);
+            const videoResult = await runApiVideoGeneration(prompt, refs);
+            const outVideos = videoResult.urls;
             if(!outVideos.length) throw new Error(tr('smart.errNoOutVideos'));
+            pendingNode.generationCost = normalizeSmartGenerationCost(videoResult.generationCost);
+            runLog.generationCost = normalizeSmartGenerationCost(videoResult.generationCost);
             finalizePendingNode(pendingNode, outVideos, pendingMeta, 'video');
             if(sourceVisualState) restoreSourceVisualState(node, sourceVisualState);
             addSmartGenerationLog({run:runLog, outputs:outVideos, runMs:nowMs() - runLogStart});
@@ -16167,6 +16308,7 @@ async function runGeneration(){
             if(!(pendingNode.images || []).length) throw new Error(tr('smart.errNoOutImages'));
             if(outpaintSize) delete node.outpaintSize;
             if(sourceVisualState) restoreSourceVisualState(node, sourceVisualState);
+            runLog.generationCost = normalizeSmartGenerationCost(pendingNode.generationCost);
             addSmartGenerationLog({run:runLog, outputs:pendingNode.images || [], runMs:nowMs() - runLogStart});
             clearPromptInput({preserveDraft:true});
             settings = previousSettings;
@@ -16222,6 +16364,7 @@ async function runPromptLLMNode(nodeId){
     const systemPrompt = (node.llmSystemPrompt || '').trim();
     node.llmEnabled = true;
     node.running = true;
+    const startedAt = nowMs();
     render();
     try {
         const provider = resolveChatProviderId(node.llmProvider || '');
@@ -16249,6 +16392,20 @@ async function runPromptLLMNode(nodeId){
         node.text = (result.text || '').trim();
         node.llmProvider = provider;
         node.llmModel = model;
+        node.generationCost = normalizeSmartGenerationCost(result.generation_cost);
+        addSmartGenerationLog({
+            run:{
+                nodeId:node.id,
+                nodeType:node.type,
+                kind:'chat',
+                settings:{engine:'api', provider_id:provider, model},
+                prompt:message,
+                refs:mediaRefs,
+                generationCost:node.generationCost
+            },
+            outputs:[],
+            runMs:nowMs() - startedAt
+        });
         scheduleSave();
     } catch(e) {
         toast((e.message || tr('smart.promptLlmFailed')).slice(0, 160));
@@ -16418,7 +16575,10 @@ async function runApiVideoGeneration(prompt, refs, runSettings=settings){
             body:JSON.stringify(payload)
         }).then(async r => { if(!r.ok) throw new Error(await smartResponseErrorMessage(r, tr('smart.errRunFailed'))); return r.json(); });
         if(result && result.jimeng_pending) throw new JimengPendingSignal({submitId:result.submit_id, kind:result.kind || 'video', queueInfo:result.queue_info, message:result.message});
-        return resultMediaUrls(result);
+        return {
+            urls:resultMediaUrls(result),
+            generationCost:normalizeSmartGenerationCost(result.generation_cost)
+        };
     } finally {
         transientSmartCloudLinks = [];
     }
@@ -17014,7 +17174,7 @@ async function querySmartImageTaskNow(nodeId, localTaskId){
         if(data.status === 'succeeded'){
             task.failed = false;
             task.querying = false;
-            finalizeSmartPendingTask(node, task.taskId, resultMediaUrls(data.image_items?.length ? data.image_items : (data.images?.length ? data.images : data)), task.kind || 'image');
+            finalizeSmartPendingTask(node, task.taskId, resultMediaUrls(data.image_items?.length ? data.image_items : (data.images?.length ? data.images : data)), task.kind || 'image', data.generation_cost);
             render();
             scheduleSave();
             return;
@@ -17096,7 +17256,7 @@ async function pollSmartCanvasTask(taskId){
         activeSmartTaskPolls.delete(taskId);
     }
 }
-function finalizeSmartPendingTask(node, taskId, images, kind='image'){
+function finalizeSmartPendingTask(node, taskId, images, kind='image', generationCost=null){
     if(!node || !taskId) return;
     node.pendingTasks = smartPendingTasks(node).filter(task => task.taskId !== taskId);
     node.pending = Math.max(0, Number(node.pending || 0) - 1);
@@ -17115,6 +17275,7 @@ function finalizeSmartPendingTask(node, taskId, images, kind='image'){
         return true;
     });
     node.images = [...existing, ...additions];
+    node.generationCost = mergeSmartGenerationCost(node.generationCost, generationCost);
     if(additions.length) node.outputKind = kind;
     if(!node.pending && smartPendingTasks(node).length === 0){
         delete node.pendingTasks;
@@ -17151,7 +17312,7 @@ async function resumeSmartPendingNode(node, logContext={}){
         if(task.failed && task.recoverTaskId) return;
         try {
             const result = await pollSmartCanvasTask(task.taskId);
-            finalizeSmartPendingTask(node, task.taskId, resultMediaUrls(result?.image_items?.length ? result.image_items : (result?.images?.length ? result.images : result)), task.kind || 'image');
+            finalizeSmartPendingTask(node, task.taskId, resultMediaUrls(result?.image_items?.length ? result.image_items : (result?.images?.length ? result.images : result)), task.kind || 'image', result?.generation_cost);
             render();
             scheduleSave();
         } catch(e) {

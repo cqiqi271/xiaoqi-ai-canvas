@@ -5,17 +5,32 @@
     const SCALE_OPTIONS = ['auto', '60', '65', '70', '75', '80', '85', '90', '95', '100', '115', '125', '140'];
 
     function currentTheme(){
-        return localStorage.getItem(KEY) || localStorage.getItem(LEGACY_KEY) || 'light';
+        return normalizeTheme(localStorage.getItem(KEY) || localStorage.getItem(LEGACY_KEY) || 'pro');
+    }
+
+    function normalizeTheme(theme){
+        if(theme === 'dark' || theme === 'future') return 'future';
+        if(theme === 'apple') return 'apple';
+        return 'pro';
+    }
+
+    function themeIsDark(theme){
+        return normalizeTheme(theme) === 'future';
     }
 
     function applyTheme(theme){
-        const next = theme === 'dark' ? 'dark' : 'light';
-        const dark = next === 'dark';
+        const next = normalizeTheme(theme);
+        const dark = themeIsDark(next);
+        const variants = ['studio-theme-pro', 'studio-theme-apple', 'studio-theme-future'];
         document.documentElement.classList.toggle('studio-theme-dark', dark);
         document.documentElement.classList.toggle('theme-dark', dark);
+        variants.forEach(name => document.documentElement.classList.remove(name));
+        document.documentElement.classList.add(`studio-theme-${next}`);
         if(document.body){
             document.body.classList.toggle('studio-theme-dark', dark);
             document.body.classList.toggle('theme-dark', dark);
+            variants.forEach(name => document.body.classList.remove(name));
+            document.body.classList.add(`studio-theme-${next}`);
         }
         window.dispatchEvent(new CustomEvent('studio-theme-change', { detail: { theme: next } }));
     }
@@ -232,11 +247,12 @@
     window.StudioTheme = {
         key: KEY,
         get: currentTheme,
+        normalize: normalizeTheme,
         apply: applyTheme,
         set(theme){
-            const next = theme === 'dark' ? 'dark' : 'light';
+            const next = normalizeTheme(theme);
             localStorage.setItem(KEY, next);
-            localStorage.setItem(LEGACY_KEY, next);
+            localStorage.setItem(LEGACY_KEY, themeIsDark(next) ? 'dark' : 'light');
             applyTheme(next);
         }
     };

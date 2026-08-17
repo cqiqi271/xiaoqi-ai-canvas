@@ -1,18 +1,18 @@
 {
-  "version": "2026.08.07.2",
-  "updated_at": "2026-08-07T17:40:00+08:00",
+  "version": "2026.08.07.3",
+  "updated_at": "2026-08-17T00:00:00+08:00",
   "items": [
     {
-      "type": "fix",
-      "text": "\u4fee\u590d 2026.08.07.1 \u4e0e\u6700\u65b0\u4fee\u590d\u540c\u7248\u672c\u53f7\u5bfc\u81f4\u65e7\u7248\u68c0\u6d4b\u4e0d\u5230\u66f4\u65b0\u7684\u95ee\u9898\u3002"
-    },
-    {
-      "type": "fix",
-      "text": "\u6062\u590d\u666e\u901a\u753b\u5e03\u4e0e\u667a\u80fd\u753b\u5e03\u56fe\u7247\u9884\u89c8\u4e2d\u7684\u62d6\u62fd\u4fdd\u5b58\u80fd\u529b\u3002"
+      "type": "update",
+      "text": "优化普通画布与智能画布的费用统计显示，新增今日、近7天、本月和全部费用统计。"
     },
     {
       "type": "update",
-      "text": "\u540c\u6b65\u53d1\u5e03 GitHub \u4e0e ModelScope \u56fd\u5185\u66f4\u65b0\u6e90\uff0c\u65e7\u7248\u53ef\u68c0\u6d4b\u5230 2026.08.07.2\u3002"
+      "text": "费用统计中增加生成次数，并区分实际扣费和估算费用。"
+    },
+    {
+      "type": "fix",
+      "text": "优化费用统计卡片布局、日期筛选和弹出关闭交互。"
     }
   ]
 }

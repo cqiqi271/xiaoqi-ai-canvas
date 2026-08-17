@@ -208,6 +208,11 @@ body.studio-theme-dark .key-btn.key-clear:hover { background:rgba(127,29,29,.18)
 .model-list { display:flex; flex-direction:column; gap:6px; }
 .model-row { display:grid; grid-template-columns:minmax(0,1fr) 36px; align-items:center; gap:6px; padding:4px; border:1px solid var(--line); border-radius:11px; background:var(--panel); }
 .model-row.has-protocol { grid-template-columns:minmax(0,1fr) auto 36px; }
+.model-row.has-price { grid-template-columns:minmax(0,1fr) 112px 36px; }
+.model-row.has-price.has-protocol { grid-template-columns:minmax(0,1fr) 112px auto 36px; }
+.model-price-field { height:32px; display:flex; align-items:center; gap:5px; padding:0 8px; border:1px solid var(--line); border-radius:8px; background:var(--soft); color:var(--muted); font-size:10px; font-weight:800; white-space:nowrap; }
+.model-price-field input { width:58px; height:28px; padding:0; border:0; background:transparent; color:var(--text); font-size:11.5px; text-align:right; outline:none; }
+body.studio-theme-dark .model-price-field { background:var(--panel); border-color:var(--line-strong); }
 body.studio-theme-dark .model-row { background:var(--soft); border-color:var(--line-strong); }
 .model-row input { height:34px; padding:0 10px; border:0; background:transparent; font-size:12.5px; }
 .model-id-field { min-width:0; display:flex; flex-direction:column; gap:2px; }
@@ -4328,6 +4333,13 @@ html.studio-theme-dark body .onboarding-step-label-alt {
 }
 
 @media (max-width:860px) { .page{padding:24px 16px 60px}.layout{grid-template-columns:1fr;gap:28px}.sidebar{position:static}.form,.model-grid,.endpoint-grid,.rh-card-columns{grid-template-columns:1fr}.models-toolbar{align-items:flex-start;flex-direction:column}.models-toolbar-actions{width:100%;justify-content:flex-end}.lora-row{grid-template-columns:1fr}.lora-row .icon-btn{width:100%;} }
+@media (max-width:680px) {
+    .model-row.has-price,
+    .model-row.has-price.has-protocol { grid-template-columns:minmax(0,1fr) 94px 36px; }
+    .model-row.has-price.has-protocol .model-protocol-select { grid-column:1 / 3; width:100%; }
+    .model-price-field { padding:0 6px; }
+    .model-price-field input { width:48px; }
+}
 @media (max-width:680px) { .rh-key-stack{grid-template-columns:1fr}.rh-key-head{grid-template-columns:1fr}.rh-key-links{justify-content:flex-start}.key-input-line{grid-template-columns:1fr}.key-actions{justify-content:flex-end}.key-btn{width:40px;height:40px} }
 @media (max-width:680px) { .volcengine-key-stack,.volcengine-project-grid{grid-template-columns:1fr} }
 @media (max-width:900px) { .rh-workflow-editor-overlay{padding:12px}.rh-workflow-editor-modal{height:94vh}.rh-workflow-editor-head{align-items:flex-start;flex-direction:column}.rh-workflow-editor-actions{width:100%;justify-content:flex-end;flex-wrap:wrap}.rh-workflow-editor-body{grid-template-columns:1fr}.rh-workflow-editor-side{border-right:0;border-bottom:1px solid var(--line);max-height:44vh}.rh-workflow-editor-canvas{min-height:44vh}.rh-editor-graph-wrap{min-height:360px}.rh-editor-field-controls{grid-template-columns:1fr} }

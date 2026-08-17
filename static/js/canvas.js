@@ -597,12 +597,20 @@ function saveLocalViewport(){
     } catch(e) {}
 }
 function applyTheme(theme){
-    const dark = theme === 'dark';
+    const next = theme === 'dark' || theme === 'future' ? 'future' : (theme === 'apple' ? 'apple' : 'pro');
+    const dark = next === 'future';
+    const variants = ['studio-theme-pro', 'studio-theme-apple', 'studio-theme-future'];
     document.documentElement.classList.toggle('studio-theme-dark', dark);
     document.documentElement.classList.toggle('theme-dark', dark);
+    variants.forEach(name => document.documentElement.classList.remove(name));
+    document.documentElement.classList.add(`studio-theme-${next}`);
     document.body.classList.toggle('studio-theme-dark', dark);
     document.body.classList.toggle('theme-dark', dark);
+    variants.forEach(name => document.body.classList.remove(name));
+    document.body.classList.add(`studio-theme-${next}`);
     shell.classList.toggle('theme-dark', dark);
+    variants.forEach(name => shell.classList.remove(name));
+    shell.classList.add(`studio-theme-${next}`);
 }
 function applyQuickToolbarState(){
     const toolbar = document.getElementById('quickToolbar');
@@ -3151,7 +3159,7 @@ async function runMsGenNode(nodeId, opts={}){
         const results = await Promise.all(Array.from({length:count}, submitMs));
         const metas = collectRunMetas(out, pendingIds);
         const outputUrls = results.map(data => data.url).filter(Boolean);
-        run.request = results[0] ? requestMetaFromResult(results[0]) : {};
+        run.request = requestMetaFromResults(results);
         if(out) out._pending = (out._pending || []).filter(p => !pendingIds.includes(p.id));
         appendOutputImages(out, outputUrls, refs[0], metas);
         mergeGeneratedOutputs(node, outputUrls, Boolean(opts.cascade));
@@ -5963,6 +5971,7 @@ function render(){
     syncCanvasSelectedImageResolution(nodesEl);
     measureCanvasOriginalImageNodes(nodesEl);
     refreshOutputTimer();
+    refreshCanvasCostSummary();
 }
 function refreshNodes(ids=[]){
     const uniqueIds = [...new Set((ids || []).filter(Boolean))];
@@ -8092,7 +8101,7 @@ function renderLLMNodePane(container, node){
         <div class="llm-pane-label">Input${isReadonly ? ' <span style="font-size:9px;opacity:.5;font-weight:600;text-transform:none;letter-spacing:0">(来自连接)</span>' : ''}</div>
         <textarea class="llm-input-area llm-input-output" style="height:${inputHeight}px; flex:0 0 ${inputHeight}px;" ${isReadonly ? 'readonly' : ''} placeholder="${inputPlaceholder}">${escapeHtml(inputValue)}</textarea>
         <div class="llm-pane-resizer" title="${tr('canvas.resizePanes')}"></div>
-        <div class="llm-pane-label">Output</div>
+        <div class="llm-pane-label llm-output-label">Output${node.generationCost ? `<span class="llm-cost-pill ${node.generationCost.source === 'reported' ? 'reported' : ''}" title="${node.generationCost.source === 'reported' ? '上游返回的实际费用' : '按 API 设置中的模型单价估算'}">${escapeHtml(formatGenerationCost(node.generationCost, {compact:true}))}</span>` : ''}</div>
         <div class="llm-output-wrap" style="height:${outputHeight}px; flex:0 0 ${outputHeight}px;">
             <button class="llm-copy-btn llm-output-copy" type="button" title="复制"><i data-lucide="copy" class="w-3.5 h-3.5"></i></button>
             <div class="llm-output llm-result-output">${escapeHtml(node.outputText || tr('canvas.llmOutputEmpty'))}</div>
@@ -8130,6 +8139,7 @@ function renderLLMChatPane(container, node){
     const messages = node.messages || [];
     container.innerHTML = `
         <div class="llm-chat-log">${messages.length ? messages.map((msg, mi) => `<div class="llm-bubble ${msg.role === 'user' ? 'user' : 'assistant'}" data-msg-idx="${mi}">${escapeHtml(msg.content || '')}${msg.role === 'assistant' ? `<button class="llm-bubble-copy" type="button" title="复制"><i data-lucide="copy" style="width:11px;height:11px;display:inline-block;vertical-align:middle"></i></button>` : ''}</div>`).join('') : `<div class="text-[11px] text-gray-300">${tr('canvas.startChat')}</div>`}</div>
+        ${node.generationCost ? `<div class="llm-chat-cost"><span>本次费用</span><strong class="${node.generationCost.source === 'reported' ? 'reported' : ''}">${escapeHtml(formatGenerationCost(node.generationCost, {compact:true}))}</strong></div>` : ''}
         <textarea class="llm-chat-input mt-2" rows="2" placeholder="${tr('canvas.chatInput')}">${escapeHtml(node.chatInput || '')}</textarea>
         <button class="llm-run mt-2" ${node.running ? 'disabled' : ''}><i data-lucide="send" class="w-4 h-4"></i>${node.running ? tr('canvas.sending') : 'Send'}</button>
     `;
@@ -10813,11 +10823,13 @@ async function runRhModelNode(node, opts={}){
         const taskInfos = await Promise.all(Array.from({length:count}, () => createCanvasImageTask(payload, {cascadeTargetId})));
         if(!out){
             let outputs = [];
+            const completedResults = [];
             for(const task of taskInfos){
                 const result = await waitCanvasImageTaskResult(task.task_id, {cascadeTargetId});
                 outputs.push(...(result.images || []));
-                run.request = requestMetaFromResult(result);
+                completedResults.push(result);
             }
+            run.request = requestMetaFromResults(completedResults);
             if(!outputs.length) throw new Error(tr('canvas.generationFailed'));
             mergeGeneratedOutputs(node, outputs, Boolean(opts.cascade));
             addGenerationLog({run, outputs, runMs:nowMs() - startedAt});
@@ -11330,11 +11342,13 @@ async function runGenerator(genId, opts={}){
         const taskInfos = await Promise.all(Array.from({length:count}, () => createCanvasImageTask(payload, {cascadeTargetId})));
         if(!out){
             let outputs = [];
+            const completedResults = [];
             for(const task of taskInfos){
                 const result = await waitCanvasImageTaskResult(task.task_id, {cascadeTargetId});
                 outputs.push(...(result.images || []));
-                run.request = requestMetaFromResult(result);
+                completedResults.push(result);
             }
+            run.request = requestMetaFromResults(completedResults);
             if(!outputs.length) throw new Error(tr('canvas.generationFailed'));
             mergeGeneratedOutputs(gen, outputs, Boolean(opts.cascade));
             addGenerationLog({run, outputs, runMs:nowMs() - startedAt});
@@ -11581,7 +11595,7 @@ async function runGeneratorLegacy(genId, opts={}){
         }).then(async r => { if(!r.ok) throw new Error(await responseErrorMessage(r, tr('canvas.generationFailed'))); return r.json(); })));
         const images = results.flatMap(result => result.images || []);
         const metas = collectRunMetas(out, pendingIds);
-        run.request = results[0] ? requestMetaFromResult(results[0]) : {};
+        run.request = requestMetaFromResults(results);
         if(out) out._pending = (out._pending||[]).filter(p => !pendingIds.includes(p.id));
         appendOutputImages(out, images, refs[0], metas);
         mergeGeneratedOutputs(gen, images, Boolean(opts.cascade));
@@ -12761,7 +12775,7 @@ async function callCanvasLLM(node, message, messages=[], options={}){
         }
         return r.json();
     });
-    return result.text || '';
+    return result;
 }
 async function runLLMNode(nodeId, opts={}){
     const node = nodes.find(n => n.id === nodeId);
@@ -12772,9 +12786,15 @@ async function runLLMNode(nodeId, opts={}){
         if(opts.cascade) throw new Error('LLM 缺少提示词输入');
         alert(tr('canvas.needPromptToLLM')); return;
     }
+    const startedAt = nowMs();
+    const run = runSnapshot(node, input, []);
     if(!opts.cascade){ node.running = true; refreshNodes([node.id]); }
     try {
-        node.outputText = await callCanvasLLM(node, input, [], {cascadeTargetId});
+        const result = await callCanvasLLM(node, input, [], {cascadeTargetId});
+        node.outputText = result.text || '';
+        node.generationCost = normalizeGenerationCost(result.generation_cost);
+        run.request = requestMetaFromResult(result);
+        addGenerationLog({run, outputs:[], runMs:nowMs() - startedAt});
         if(!opts.cascade) node.running = false;
         node.runStatus = 'done'; node.runError = '';
         refreshNodes([node.id]);
@@ -13210,9 +13230,15 @@ async function runLLMChat(nodeId){
     node.running = true;
     refreshNodes([node.id]);
     try {
-        const text = await callCanvasLLM(node, message, history);
+        const startedAt = nowMs();
+        const result = await callCanvasLLM(node, message, history);
+        const text = result.text || '';
         node.messages.push({role:'assistant', content:text});
         node.outputText = text;
+        node.generationCost = normalizeGenerationCost(result.generation_cost);
+        const run = runSnapshot(node, message, []);
+        run.request = requestMetaFromResult(result);
+        addGenerationLog({run, outputs:[], runMs:nowMs() - startedAt});
         node.running = false;
         refreshNodes([node.id]);
         scheduleSave();
@@ -13338,6 +13364,7 @@ function runTaskLabel(run){
     if(run?.nodeType === 'ltxDirector') return tr('canvas.ltxDirector');
     if(run?.nodeType === 'generator') return node.model || 'API Image';
     if(run?.nodeType === 'video') return node.model || 'Video';
+    if(run?.nodeType === 'llm') return node.model || node.llmMsModel || 'LLM';
     if(run?.nodeType === 'msgen') return node.msCustomModel || node.msgenModel || 'Modelscope';
     return run?.nodeType || 'Generate';
 }
@@ -13350,13 +13377,134 @@ function requestMetaFromResult(result={}){
         prompt_id: result.prompt_id || '',
         workflow_json: result.workflow_json || '',
         seed: result.seed || '',
+        generation_cost: normalizeGenerationCost(result.generation_cost),
     };
+}
+function normalizeGenerationCost(value){
+    if(!value || typeof value !== 'object') return null;
+    const amount = Number(value.amount);
+    if(!Number.isFinite(amount) || amount < 0) return null;
+    return {
+        amount,
+        currency:String(value.currency || 'CNY').toUpperCase(),
+        source:value.source === 'reported' ? 'reported' : 'estimated',
+        count:Math.max(1, Number(value.count || 1)),
+        unit_price:Number.isFinite(Number(value.unit_price)) ? Number(value.unit_price) : undefined
+    };
+}
+function mergeGenerationCost(current, addition){
+    const left = normalizeGenerationCost(current);
+    const right = normalizeGenerationCost(addition);
+    if(!right) return left;
+    if(!left) return right;
+    if(left.currency !== right.currency) return left;
+    return {
+        amount:left.amount + right.amount,
+        currency:left.currency,
+        source:left.source === 'reported' && right.source === 'reported' ? 'reported' : 'estimated',
+        count:Number(left.count || 1) + Number(right.count || 1)
+    };
+}
+function requestMetaFromResults(results=[]){
+    const list = (results || []).filter(Boolean);
+    const meta = list[0] ? requestMetaFromResult(list[0]) : {};
+    meta.generation_cost = list.reduce((total, result) => mergeGenerationCost(total, result?.generation_cost), null);
+    return meta;
+}
+function formatGenerationCost(cost, options={}){
+    const item = normalizeGenerationCost(cost);
+    if(!item) return '';
+    const symbol = ['CNY','RMB','CNH'].includes(item.currency) ? '¥' : item.currency === 'USD' ? '$' : `${item.currency} `;
+    const digits = item.amount >= 1 ? 2 : item.amount >= 0.01 ? 3 : 4;
+    const prefix = item.source === 'reported' ? '' : (options.compact ? '约' : '估算 ');
+    return `${prefix}${symbol}${item.amount.toFixed(digits)}`;
+}
+function canvasCostPeriodStart(period='today'){
+    const now = new Date();
+    if(period === 'today') return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    if(period === '7d'){
+        const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        start.setDate(start.getDate() - 6);
+        return start.getTime();
+    }
+    if(period === 'month') return new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+    return 0;
+}
+function canvasCostLogs(period='today'){
+    const start = canvasCostPeriodStart(period);
+    return (canvas?.logs || []).filter(log => {
+        if(log?.status !== 'success') return false;
+        const createdAt = Number(log.createdAt || 0);
+        return !start || (createdAt >= start && createdAt <= Date.now());
+    });
+}
+function canvasCostTotals(logs=canvasCostLogs('all'), source='all'){
+    const totals = {};
+    (logs || []).forEach(log => {
+        const cost = normalizeGenerationCost(log.generationCost || log.request?.generation_cost);
+        if(!cost || (source !== 'all' && cost.source !== source)) return;
+        totals[cost.currency] = (totals[cost.currency] || 0) + cost.amount;
+    });
+    return totals;
+}
+function canvasFormatCostTotals(totals, empty='—'){
+    const parts = Object.entries(totals || {}).map(([currency, amount]) => formatGenerationCost({amount, currency, source:'reported'}));
+    return parts.length ? parts.join(' + ') : empty;
+}
+function canvasRenderCostStats(period='today'){
+    const logs = canvasCostLogs(period);
+    const total = document.getElementById('canvasCostTotal');
+    const reported = document.getElementById('canvasCostReported');
+    const estimated = document.getElementById('canvasCostEstimated');
+    const count = document.getElementById('canvasCostCount');
+    if(total) total.textContent = canvasFormatCostTotals(canvasCostTotals(logs));
+    if(reported) reported.textContent = canvasFormatCostTotals(canvasCostTotals(logs, 'reported'));
+    if(estimated) estimated.textContent = canvasFormatCostTotals(canvasCostTotals(logs, 'estimated'));
+    if(count) count.textContent = `${logs.length} 次`;
+    document.querySelectorAll('[data-canvas-cost-period]').forEach(btn => {
+        const active = btn.dataset.canvasCostPeriod === period;
+        btn.classList.toggle('active', active);
+        btn.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+}
+function initCanvasCostStats(){
+    const summary = document.getElementById('canvasCostSummary');
+    const popover = document.getElementById('canvasCostPopover');
+    if(!summary || !popover || summary.dataset.bound === '1') return;
+    summary.dataset.bound = '1';
+    let period = 'today';
+    const close = () => { popover.hidden = true; summary.setAttribute('aria-expanded', 'false'); };
+    summary.addEventListener('click', event => {
+        event.stopPropagation();
+        popover.hidden = !popover.hidden;
+        summary.setAttribute('aria-expanded', popover.hidden ? 'false' : 'true');
+        if(!popover.hidden) canvasRenderCostStats(period);
+    });
+    document.getElementById('canvasCostPopoverClose')?.addEventListener('click', close);
+    popover.addEventListener('click', event => event.stopPropagation());
+    document.querySelectorAll('[data-canvas-cost-period]').forEach(btn => btn.addEventListener('click', () => {
+        period = btn.dataset.canvasCostPeriod || 'today';
+        canvasRenderCostStats(period);
+    }));
+    document.addEventListener('click', close);
+    document.addEventListener('keydown', event => { if(event.key === 'Escape') close(); });
+}
+function refreshCanvasCostSummary(){
+    const el = document.getElementById('canvasCostSummary');
+    if(!el) return;
+    const logs = canvasCostLogs('today');
+    const parts = canvasFormatCostTotals(canvasCostTotals(logs), '¥0.00');
+    el.textContent = `今日 ${parts} · ${logs.length}次`;
+    el.title = '点击查看今日、近7天、本月和全部费用统计';
+    initCanvasCostStats();
+    canvasRenderCostStats(document.querySelector('[data-canvas-cost-period].active')?.dataset.canvasCostPeriod || 'today');
 }
 function runPlatformLabel(run){
     const node = run?.node || {};
     if(run?.nodeType === 'generator') return providerById(node.apiProvider || 'comfly')?.name || node.apiProvider || 'API';
     if(run?.nodeType === 'msgen') return 'Modelscope';
     if(run?.nodeType === 'video') return providerById(node.apiProvider || 'comfly')?.name || node.apiProvider || 'Video';
+    if(run?.nodeType === 'llm') return providerById(node.llmProvider || 'comfly')?.name || node.llmProvider || 'LLM';
     if(run?.nodeType === 'comfy') return 'ComfyUI';
     if(run?.nodeType === 'ltxDirector') return 'ComfyUI';
     return run?.nodeType || 'Generate';
@@ -13393,6 +13541,7 @@ function addGenerationLog({run, outputs=[], runMs=0, error=''}) {
         outputs:(outputs || []).filter(Boolean),
         refs:run?.refs || [],
         runMs:Number(runMs || 0),
+        generationCost:error ? null : normalizeGenerationCost(run?.request?.generation_cost),
         error:error ? String(error) : '',
     };
     canvas.logs = [entry, ...canvas.logs].slice(0, 500);
@@ -13432,6 +13581,7 @@ function renderCanvasLog(){
                     <span class="log-chip">${escapeHtml(log.platform || '-')}</span>
                     ${taskLabel ? `<span class="log-chip">${escapeHtml(taskLabel)}</span>` : ''}
                     <span class="log-chip">${escapeHtml(formatRunDuration(log.runMs || 0))}</span>
+                    ${log.generationCost ? `<span class="log-chip cost-chip" title="${log.generationCost.source === 'reported' ? '上游返回的实际费用' : '按 API 设置中的模型单价估算'}">${escapeHtml(formatGenerationCost(log.generationCost))}</span>` : ''}
                 </div>
                 <div class="log-subline">${subParts.map(part => `<span title="${escapeAttr(part)}">${escapeHtml(part)}</span>`).join('')}</div>
                 ${log.error ? `<div class="log-error" title="${escapeAttr(log.error)}" data-error="${escapeAttr(log.error)}">${escapeHtml(log.error)}</div>` : ''}
@@ -13800,11 +13950,13 @@ function renderOutputMedia(item, useGridLayout=false){
     const grid = useGridLayout ? (meta.grid || null) : null;
     const gridStyle = grid ? ` style="grid-row:${Number(grid.row || 0) + 1};grid-column:${Number(grid.col || 0) + 1};aspect-ratio:${Math.max(1, Number(grid.w || 1))}/${Math.max(1, Number(grid.h || 1))}"` : '';
     const timePill = meta.runMs && !meta.viewed ? `<span class="output-time-pill">${formatRunDuration(meta.runMs)}</span>` : '';
+    const cost = normalizeGenerationCost(meta.run?.request?.generation_cost);
+    const costPill = cost ? `<span class="output-cost-pill ${cost.source === 'reported' ? 'reported' : 'estimated'}" title="${cost.source === 'reported' ? '上游返回的实际费用' : '按模型单价估算'}">${escapeHtml(formatGenerationCost(cost, {compact:true}))}</span>` : '';
     if(isMissingAssetUrl(url)){
-        return `<div class="output-img-wrap" data-output-url="${safe}" data-missing-url="${safe}"${gridStyle}>${missingAssetHtml(url, true)}${timePill}<button class="output-del" title="${tr('common.delete')}">×</button></div>`;
+        return `<div class="output-img-wrap" data-output-url="${safe}" data-missing-url="${safe}"${gridStyle}>${missingAssetHtml(url, true)}${timePill}${costPill}<button class="output-del" title="${tr('common.delete')}">×</button></div>`;
     }
     if(kind === 'video'){
-        return `<div class="output-img-wrap" data-output-url="${safe}"${gridStyle}>${canvasVideoPreviewHtml(url, useGridLayout ? 512 : 768, 'alt="video output" data-video-fallback-attrs="controls data-output-video-fallback=&quot;1&quot;"')}${timePill}<button class="canvas-video-play output-video-play" type="button" title="播放"><i data-lucide="play"></i></button><div class="output-video-badge"><i data-lucide="play" class="w-3 h-3"></i>VIDEO</div><button class="output-del" title="${tr('common.delete')}">×</button></div>`;
+        return `<div class="output-img-wrap" data-output-url="${safe}"${gridStyle}>${canvasVideoPreviewHtml(url, useGridLayout ? 512 : 768, 'alt="video output" data-video-fallback-attrs="controls data-output-video-fallback=&quot;1&quot;"')}${timePill}${costPill}<button class="canvas-video-play output-video-play" type="button" title="播放"><i data-lucide="play"></i></button><div class="output-video-badge"><i data-lucide="play" class="w-3 h-3"></i>VIDEO</div><button class="output-del" title="${tr('common.delete')}">×</button></div>`;
     }
     if(kind === 'audio'){
         return `<div class="output-img-wrap output-audio-wrap" data-output-url="${safe}"${gridStyle}><div class="output-audio-card"><i data-lucide="file-audio" class="w-7 h-7"></i><span>${escapeHtml(outputImageName(url))}</span><audio src="${safe}" data-url="${safe}" controls preload="metadata"></audio></div>${timePill}<button class="output-del" title="${tr('common.delete')}">×</button></div>`;
@@ -13814,7 +13966,7 @@ function renderOutputMedia(item, useGridLayout=false){
         const label = kind === 'text' ? 'TEXT' : 'FILE';
         return `<div class="output-img-wrap output-file-wrap" data-output-url="${safe}"${gridStyle}><div class="output-file-card"><i data-lucide="${icon}" class="w-7 h-7"></i><span>${escapeHtml(meta.name || outputImageName(url))}</span><small>${label}</small></div>${timePill}<button class="output-del" title="${tr('common.delete')}">×</button></div>`;
     }
-    return `<div class="output-img-wrap" data-output-url="${safe}"${gridStyle}>${canvasPreviewImgHtml(url, useGridLayout ? 512 : 768, 'alt="generated output"')}${timePill}<button class="output-del" title="${tr('common.delete')}">×</button></div>`;
+    return `<div class="output-img-wrap" data-output-url="${safe}"${gridStyle}>${canvasPreviewImgHtml(url, useGridLayout ? 512 : 768, 'alt="generated output"')}${timePill}${costPill}<button class="output-del" title="${tr('common.delete')}">×</button></div>`;
 }
 function outputGridLayout(node){
     const images = node?.images || [];

@@ -3456,14 +3456,17 @@ function renderModels(kind){
         return;
     }
     const showProtocol = kind !== 'video' && providerSupportsModelProtocol(item);
+    const prices = ensureModelPrices(item);
     list.innerHTML = models.map((model, index) => {
         const label = modelDisplayName(model, item);
+        const price = prices[kind]?.[String(model || '').trim()];
         return `
-            <div class="model-row${showProtocol ? ' has-protocol' : ''}">
+            <div class="model-row${showProtocol ? ' has-protocol' : ''} has-price">
                 <div class="model-id-field">
                     ${label && label !== model ? `<div class="model-display-name">${escapeHtml(label)}</div>` : ''}
                     <input value="${escapeAttr(model)}" oninput="updateModel('${kind}', ${index}, this.value)">
                 </div>
+                <label class="model-price-field" title="系统会优先自动读取实际扣费；平台不提供计费数据时才使用这个备用价格"><span>备用¥/次</span><input type="number" min="0" step="0.0001" value="${price ?? ''}" placeholder="可不填" oninput="updateModelPrice('${kind}', ${index}, this.value)"></label>
                 ${modelProtocolSelectHtml(kind, index, model, item)}
                 <button class="icon-btn" type="button" onclick="removeModel('${kind}', ${index})" title="删除"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
             </div>
@@ -3680,6 +3683,28 @@ function addModel(kind){
     renderModels(kind);
     if(kind === 'image') renderMsLoras();
 }
+function ensureModelPrices(item){
+    if(!item.model_prices || typeof item.model_prices !== 'object') item.model_prices = {};
+    ['image','chat','video'].forEach(kind => {
+        if(!item.model_prices[kind] || typeof item.model_prices[kind] !== 'object') item.model_prices[kind] = {};
+    });
+    return item.model_prices;
+}
+function updateModelPrice(kind, index, value){
+    const item = provider();
+    if(!item) return;
+    const key = kind === 'image' ? 'image_models' : kind === 'video' ? 'video_models' : 'chat_models';
+    const model = String(item[key]?.[index] || '').trim();
+    if(!model) return;
+    const prices = ensureModelPrices(item);
+    const text = String(value ?? '').trim();
+    if(!text){
+        delete prices[kind][model];
+        return;
+    }
+    const price = Number(text);
+    if(Number.isFinite(price) && price >= 0) prices[kind][model] = price;
+}
 function modelProtocolStillUsed(item, name){
     if(!item || !name) return false;
     const lists = ['image_models', 'chat_models', 'video_models'];
@@ -3711,6 +3736,14 @@ function updateModel(kind, index, value){
             if(newName && label && label !== newName) item.model_names[newName] = label;
         }
     }
+    if(oldName && oldName !== newName){
+        const prices = ensureModelPrices(item);
+        if(Object.prototype.hasOwnProperty.call(prices[kind], oldName)){
+            const price = prices[kind][oldName];
+            delete prices[kind][oldName];
+            if(newName) prices[kind][newName] = price;
+        }
+    }
     if(kind === 'image') renderMsLoras();
 }
 function updateModelProtocol(kind, index, value){
@@ -3738,6 +3771,7 @@ function removeModel(kind, index){
     if(removed && item.model_names && typeof item.model_names === 'object' && !modelProtocolStillUsed(item, removed)){
         delete item.model_names[removed];
     }
+    if(removed) delete ensureModelPrices(item)[kind][removed];
     renderModels(kind);
     if(kind === 'image') renderMsLoras();
 }
@@ -3795,6 +3829,16 @@ async function saveProviders(){
             if(raw && label && label !== raw) modelNameMap[raw] = label;
         });
         item.model_names = modelNameMap;
+        const prices = ensureModelPrices(item);
+        const validModels = {image:new Set(item.image_models), chat:new Set(item.chat_models), video:new Set(item.video_models)};
+        Object.keys(validModels).forEach(kind => {
+            Object.keys(prices[kind]).forEach(model => {
+                const price = Number(prices[kind][model]);
+                if(!validModels[kind].has(model) || !Number.isFinite(price) || price < 0) delete prices[kind][model];
+                else prices[kind][model] = price;
+            });
+        });
+        item.model_prices = prices;
         item.rh_apps = normalizeRhEntries(item.rh_apps || [], 'app');
         item.rh_workflows = normalizeRhEntries(item.rh_workflows || [], 'workflow');
         item.ms_loras = (Array.isArray(item.ms_loras) ? item.ms_loras : []).map(lora => ({
@@ -3831,6 +3875,7 @@ async function saveProviders(){
                 video_models:item.video_models || [],
                 model_names:(item.model_names && typeof item.model_names === 'object') ? item.model_names : {},
                 model_protocols:(item.model_protocols && typeof item.model_protocols === 'object') ? item.model_protocols : {},
+                model_prices:ensureModelPrices(item),
                 ms_loras:item.id === 'modelscope' ? (item.ms_loras || []) : [],
                 ms_defaults_version:item.id === 'modelscope' ? (item.ms_defaults_version || 1) : 0,
                 rh_apps:item.id === 'runninghub' ? (item.rh_apps || []) : [],
