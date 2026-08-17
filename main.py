@@ -163,13 +163,13 @@ class ConnectionManager:
 manager = ConnectionManager()
 GLOBAL_LOOP = None
 APP_VERSION = "2026.08.07.3"
-GITHUB_REPO_URL = "https://github.com/hero8152/Infinite-Canvas"
-GITHUB_VERSION_URL = "https://raw.githubusercontent.com/hero8152/Infinite-Canvas/main/VERSION"
-GITHUB_TREE_URL = "https://api.github.com/repos/hero8152/Infinite-Canvas/git/trees/main?recursive=1"
-GITHUB_RAW_ROOT = "https://raw.githubusercontent.com/hero8152/Infinite-Canvas/main"
+GITHUB_REPO_URL = "https://github.com/cqiqi271/xiaoqi-ai-canvas"
+GITHUB_VERSION_URL = "https://raw.githubusercontent.com/cqiqi271/xiaoqi-ai-canvas/main/VERSION"
+GITHUB_TREE_URL = "https://api.github.com/repos/cqiqi271/xiaoqi-ai-canvas/git/trees/main?recursive=1"
+GITHUB_RAW_ROOT = "https://raw.githubusercontent.com/cqiqi271/xiaoqi-ai-canvas/main"
 GITHUB_UPDATE_NOTES_URL = GITHUB_RAW_ROOT + "/static/update-notes.json"
 MODELSCOPE_REPO_URL = "https://modelscope.cn/studios/xtwlgzs/Infinite-Canvas"
-MODELSCOPE_RAW_ROOT = "https://www.modelscope.cn/studios/xtwlgzs/Infinite-Canvas/raw/main"
+MODELSCOPE_RAW_ROOT = "https://www.modelscope.cn/studios/xtwlgzs/Infinite-Canvas/raw/master"
 # ModelScope 仓库默认分支为 master；raw 网页路径会返回 HTML，必须用仓库文件 API 才能拿到纯文本
 # 注意：API 路径大小写敏感，用户名必须和 ModelScope 空间路径一致。
 MODELSCOPE_FILE_API_ROOT = "https://www.modelscope.cn/api/v1/studio/xtwlgzs/Infinite-Canvas/repo?Revision=master&FilePath="
