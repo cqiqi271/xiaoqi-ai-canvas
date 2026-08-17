@@ -101,7 +101,33 @@ let portDragState = null;
 let connectionEraseState = null;
 let saveTimer = null;
 let apiProviders = [];
-let centralModelPriceCatalog = null;
+const BUILTIN_MODEL_PRICE_CATALOG = {
+    schema_version:1,
+    currency:'CNY',
+    providers:[{
+        id:'xiaoqi-api',
+        provider_ids:['lingjing'],
+        base_urls:['https://api.lvziai.xyz','https://api.lvziai.xyz/v1'],
+        prices:{image:{'gpt-image-2-CH副1':0.04,'gpt-image-2-1-4k稳副':0.12},chat:{'DeepSeek-V4-Flash[free]':0},video:{}}
+    }]
+};
+let centralModelPriceCatalog = BUILTIN_MODEL_PRICE_CATALOG;
+function withBuiltinModelPriceCatalog(value){
+    const source = value && typeof value === 'object' ? value : {};
+    const providers = Array.isArray(source.providers) ? source.providers.map(item => ({...item, prices:{...(item.prices || {})}})) : [];
+    const fallback = BUILTIN_MODEL_PRICE_CATALOG.providers[0];
+    const match = providers.find(item => {
+        const ids = (item.provider_ids || []).map(id => String(id).toLowerCase());
+        const bases = (item.base_urls || []).map(url => String(url).replace(/\/+$/, '').toLowerCase());
+        return ids.includes('lingjing') || bases.includes('https://api.lvziai.xyz');
+    });
+    if(match){
+        match.provider_ids = [...new Set([...(match.provider_ids || []), ...fallback.provider_ids])];
+        match.base_urls = [...new Set([...(match.base_urls || []), ...fallback.base_urls])];
+        match.prices = {image:{...fallback.prices.image,...(match.prices.image || {})},chat:{...fallback.prices.chat,...(match.prices.chat || {})},video:{...fallback.prices.video,...(match.prices.video || {})}};
+    } else providers.push({...fallback, prices:{image:{...fallback.prices.image},chat:{...fallback.prices.chat},video:{...fallback.prices.video}}});
+    return {...BUILTIN_MODEL_PRICE_CATALOG,...source,currency:source.currency || 'CNY',providers};
+}
 let comfyWorkflows = [];
 let comfyInstanceCount = 1;
 let assetLibrary = {categories:[]};
@@ -4407,7 +4433,7 @@ async function loadConfig(){
     try {
         const cfg = await fetch('/api/config').then(r => r.json());
         apiProviders = Array.isArray(cfg.api_providers) ? cfg.api_providers : [];
-        centralModelPriceCatalog = cfg.model_price_catalog && typeof cfg.model_price_catalog === 'object' ? cfg.model_price_catalog : null;
+        centralModelPriceCatalog = withBuiltinModelPriceCatalog(cfg.model_price_catalog);
         comfyInstanceCount = Math.max(1, (Array.isArray(cfg.comfy_instances) ? cfg.comfy_instances : []).filter(Boolean).length || 1);
         // 提供商配置已就绪即先渲染参数面板，避免等工作流/RunningHub 预取完成后参数才「突然刷新出来」。
         sanitizeSmartApiSelection(settings);
