@@ -732,6 +732,57 @@ function providerImageModels(providerId){
     const provider = apiProviders.find(p => p.id === providerId);
     return uniqueModels(provider?.image_models || []);
 }
+function providerModelUnitPrice(providerId, model, kind='image'){
+    const provider = apiProviders.find(p => p.id === providerId);
+    const prices = provider?.model_prices?.[kind];
+    const value = prices && Object.prototype.hasOwnProperty.call(prices, String(model || '').trim())
+        ? Number(prices[String(model || '').trim()])
+        : NaN;
+    return Number.isFinite(value) && value >= 0 ? value : null;
+}
+function estimatedGenerationCost(providerId, model, count=1, kind='image'){
+    const unitPrice = providerModelUnitPrice(providerId, model, kind);
+    if(unitPrice === null) return null;
+    const amountCount = Math.max(1, Number(count) || 1);
+    return {amount:unitPrice * amountCount, currency:'CNY', source:'estimated', count:amountCount, unit_price:unitPrice};
+}
+function generationCostForRun(run, count=1, kind='image'){
+    const node = run?.node || {};
+    const request = run?.request || {};
+    const providerId = request.provider_id
+        || node.apiProvider
+        || node.provider_id
+        || (run?.nodeType === 'llm' ? node.llmProvider : '')
+        || '';
+    const model = request.model
+        || node.model
+        || (run?.nodeType === 'llm' ? (node.llmModel || node.llmMsModel) : '')
+        || '';
+    return estimatedGenerationCost(providerId, model, count, kind);
+}
+function ensureRunRequestMeta(run, resultMeta={}, count=1, kind='image'){
+    if(!run) return resultMeta || {};
+    run.request = {...(resultMeta || {})};
+    const node = run.node || {};
+    if(!run.request.provider_id) run.request.provider_id = node.apiProvider || node.provider_id || '';
+    if(!run.request.model) run.request.model = node.model || '';
+    if(!normalizeGenerationCost(run.request.generation_cost)){
+        const estimate = generationCostForRun(run, count, kind);
+        if(estimate) run.request.generation_cost = estimate;
+    }
+    return run.request;
+}
+function generationCostEstimateContent(providerId, model, count=1, kind='image'){
+    const estimate = estimatedGenerationCost(providerId, model, count, kind);
+    if(!estimate) return '<span>费用估算</span><strong>未设置费率</strong><em>请到 API 设置填写“备用¥/次”</em>';
+    const unit = formatGenerationCost({...estimate, amount:estimate.unit_price, count:1}, {compact:true});
+    const total = formatGenerationCost(estimate, {compact:true});
+    const label = kind === 'video' ? '本次' : `本次 ${estimate.count} 张`;
+    return `<span>费用估算</span><strong>单次 ${escapeHtml(unit)} · ${label} ${escapeHtml(total)}</strong><em>按当前 API 费率估算，实际扣费以上游返回为准</em>`;
+}
+function generationCostEstimateHtml(providerId, model, count=1, kind='image'){
+    return `<div class="generation-cost-estimate" data-cost-estimate="1">${generationCostEstimateContent(providerId, model, count, kind)}</div>`;
+}
 function sanitizeImageNodeProviderModel(node){
     if(!node || node.type !== 'generator') return;
     node.apiProvider = resolveImageProviderId(node.apiProvider || '');
@@ -8382,6 +8433,7 @@ function renderGeneratorBody(node){
                 <button class="secondary-btn fit-size-btn" type="button" style="height:32px;align-self:flex-end;padding:0 10px;font-size:11px">${tr('canvas.fitImageSize')}</button>
             </div>
         </div>
+        ${generationCostEstimateHtml(node.apiProvider, node.model, node.count || 1, 'image')}
         <div class="gen-run-row">
             <button class="gen-btn ${node.running ? 'running' : ''}" ${node.running ? 'disabled' : ''}><i data-lucide="zap" class="w-4 h-4"></i>${node.running ? tr('canvas.generating') : tr('canvas.apiGenerate')}</button>
             ${cascadeBtnHtml(node)}
@@ -8390,6 +8442,10 @@ function renderGeneratorBody(node){
     `;
     const providerSelect = wrap.querySelector('.provider-select');
     const modelSelect = wrap.querySelector('.model-select');
+    const costEstimate = wrap.querySelector('[data-cost-estimate]');
+    const syncCostEstimate = () => {
+        if(costEstimate) costEstimate.innerHTML = generationCostEstimateContent(node.apiProvider, node.model, node.count || 1, 'image');
+    };
     providerSelect.onmousedown = e => e.stopPropagation();
     providerSelect.onclick = e => e.stopPropagation();
     providerSelect.onchange = e => {
@@ -8402,6 +8458,7 @@ function renderGeneratorBody(node){
         modelSelect.innerHTML = imageModelOptions(node.model, node.apiProvider);
         syncSizeControls();
         syncQualityControls();
+        syncCostEstimate();
         scheduleSave();
     };
     modelSelect.onmousedown = e => e.stopPropagation();
@@ -8413,6 +8470,7 @@ function renderGeneratorBody(node){
         if(node.resolution !== 'custom') node.resolution = defaultApiImageResolution(node.model);
         syncSizeControls();
         syncQualityControls();
+        syncCostEstimate();
         scheduleSave();
     };
     const ratioSelect = wrap.querySelector('.ratio');
@@ -8603,6 +8661,7 @@ function renderGeneratorBody(node){
     countInput.oninput = e => {
         const value = Math.max(1, Math.min(8, Number(e.target.value) || 1));
         node.count = value;
+        syncCostEstimate();
         scheduleSave();
     };
     countInput.onblur = e => { e.target.value = String(Math.max(1, Math.min(8, Number(node.count || 1)))); };
@@ -8612,6 +8671,7 @@ function renderGeneratorBody(node){
             const next = Math.max(1, Math.min(8, Number(node.count || 1) + Number(btn.dataset.step || 0)));
             node.count = next;
             countInput.value = String(next);
+            syncCostEstimate();
             scheduleSave();
         };
     });
@@ -13373,6 +13433,7 @@ function requestMetaFromResult(result={}){
         task_id: result.task_id || result.raw?.task_id || result.raw?.data?.task_id || (Array.isArray(result.raw?.data) ? result.raw.data[0]?.task_id : '') || '',
         request_id: result.request_id || result.id || result.raw?.id || '',
         provider_id: result.provider_id || result.params?.provider_id || '',
+        model: result.model || result.params?.model || '',
         backend: result.backend || '',
         prompt_id: result.prompt_id || '',
         workflow_json: result.workflow_json || '',
@@ -13441,7 +13502,8 @@ function canvasCostLogs(period='today'){
 function canvasCostTotals(logs=canvasCostLogs('all'), source='all'){
     const totals = {};
     (logs || []).forEach(log => {
-        const cost = normalizeGenerationCost(log.generationCost || log.request?.generation_cost);
+        const cost = normalizeGenerationCost(log.generationCost || log.request?.generation_cost)
+            || estimatedGenerationCost(log.request?.provider_id || '', log.request?.model || log.model || '', 1, 'image');
         if(!cost || (source !== 'all' && cost.source !== source)) return;
         totals[cost.currency] = (totals[cost.currency] || 0) + cost.amount;
     });
@@ -13493,7 +13555,7 @@ function refreshCanvasCostSummary(){
     const el = document.getElementById('canvasCostSummary');
     if(!el) return;
     const logs = canvasCostLogs('today');
-    const parts = canvasFormatCostTotals(canvasCostTotals(logs), '¥0.00');
+    const parts = canvasFormatCostTotals(canvasCostTotals(logs), '未设置费率');
     el.textContent = `今日 ${parts} · ${logs.length}次`;
     el.title = '点击查看今日、近7天、本月和全部费用统计';
     initCanvasCostStats();
@@ -13529,6 +13591,9 @@ function addGenerationLog({run, outputs=[], runMs=0, error=''}) {
     if(!canvas) return;
     canvas.logs = canvas.logs || [];
     if(!error && (outputs || []).some(item => outputUrlValue(item))) playGenerationCompleteSound();
+    const logKind = run?.nodeType === 'video' ? 'video' : run?.nodeType === 'llm' ? 'chat' : 'image';
+    const outputCount = Math.max(1, (outputs || []).filter(item => outputUrlValue(item)).length || run?.node?.count || 1);
+    ensureRunRequestMeta(run, run?.request || {}, outputCount, logKind);
     const entry = {
         id:uid('log'),
         createdAt:Date.now(),
@@ -13766,7 +13831,7 @@ function completeRecoverPendingOutput(out, pending, result){
         runMs: nowMs() - Number(pending.startedAt || nowMs()),
         run: pending.run || {},
     };
-    meta.run.request = requestMetaFromResult(result);
+    ensureRunRequestMeta(meta.run, requestMetaFromResult(result), images.length || 1, 'image');
     out._pending = (out._pending || []).filter(p => p.id !== pending.id);
     appendOutputImages(out, images, meta.run?.refs?.[0], [meta]);
     const gen = nodes.find(n => n.id === meta.run?.node?.id);
@@ -13879,12 +13944,12 @@ function completeCanvasImageTask(taskId, result){
     const found = findPendingTask(taskId);
     if(!found) return;
     const {out, pending} = found;
+    const images = result.images || [];
     const meta = {
         runMs: nowMs() - Number(pending.startedAt || nowMs()),
         run: pending.run || {},
     };
-    meta.run.request = requestMetaFromResult(result);
-    const images = result.images || [];
+    ensureRunRequestMeta(meta.run, requestMetaFromResult(result), images.length || 1, 'image');
     out._pending = (out._pending || []).filter(p => p.id !== pending.id);
     appendOutputImages(out, images, meta.run?.refs?.[0], [meta]);
     const gen = nodes.find(n => n.id === meta.run?.node?.id);

@@ -24,6 +24,12 @@ html[data-studio-scale="off"].studio-scale-managed .asset-manager-panel {
 .canvas-cost-summary:hover { background:rgba(13,148,136,.16); color:#0b5f57; transform:translateY(-1px); }
 .theme-dark .canvas-cost-summary { background:rgba(45,212,191,.12); color:#5eead4; }
 .theme-dark .canvas-cost-summary:hover { background:rgba(45,212,191,.2); color:#99f6e4; }
+.generation-cost-estimate { display:grid; gap:3px; margin:10px 0 2px; padding:9px 11px; border:1px solid rgba(245,158,11,.24); border-radius:12px; background:rgba(245,158,11,.08); color:#92400e; }
+.generation-cost-estimate span { font-size:10px; font-weight:800; color:#b45309; }
+.generation-cost-estimate strong { font-size:11px; font-weight:900; }
+.generation-cost-estimate em { font-size:9px; line-height:1.45; color:#a16207; font-style:normal; }
+.theme-dark .generation-cost-estimate { background:rgba(245,158,11,.12); border-color:rgba(245,158,11,.28); color:#fcd34d; }
+.theme-dark .generation-cost-estimate span,.theme-dark .generation-cost-estimate em { color:#fbbf24; }
 .cost-stats-popover { position:absolute; top:78px; left:24px; z-index:90; width:min(340px, calc(100vw - 48px)); padding:16px; border:1px solid var(--line); border-radius:20px; background:color-mix(in srgb, var(--panel) 94%, transparent); color:var(--text); box-shadow:0 24px 70px rgba(15,23,42,.18); backdrop-filter:blur(22px); }
 .cost-stats-popover[hidden] { display:none !important; }
 .cost-stats-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
