@@ -1,22 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-08-17T21:30:00+08:00",
+  "updated_at": "2026-08-18T10:00:00+08:00",
   "currency": "CNY",
-  "providers": [
-    {
-      "id": "xiaoqi-api",
-      "provider_ids": ["lingjing"],
-      "base_urls": ["https://api.lvziai.xyz", "https://api.lvziai.xyz/v1"],
-      "prices": {
-        "image": {
-          "gpt-image-2-CH副1": 0.04,
-          "gpt-image-2-1-4k稳副": 0.12
-        },
-        "chat": {
-          "DeepSeek-V4-Flash[free]": 0
-        },
-        "video": {}
-      }
-    }
-  ]
+  "providers": []
 }

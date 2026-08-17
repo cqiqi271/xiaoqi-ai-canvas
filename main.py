@@ -4839,13 +4839,17 @@ def central_catalog_generation_cost(provider, model, kind="image", count=1):
     return None
 
 def reported_generation_cost(raw):
-    """只读取带明确币种的上游扣费字段，避免把 token 数误当金额。"""
-    cost_keys = ("total_cost", "cost", "charged_amount", "charge_amount", "amount_charged")
-    currency_keys = ("currency", "cost_currency", "billing_currency")
-    allowed_currency = {"CNY", "RMB", "CNH", "USD"}
+    """Read an explicitly reported charge, never infer money from tokens."""
+    cost_keys = (
+        "total_cost", "cost", "charged_amount", "charge_amount",
+        "amount_charged", "total_price", "price", "amount",
+        "charge", "charged",
+    )
+    currency_keys = ("currency", "cost_currency", "billing_currency", "price_currency", "charge_currency")
+    allowed_currency = {"CNY", "RMB", "CNH", "USD", "EUR", "JPY", "GBP", "HKD", "TWD"}
     seen = set()
 
-    def visit(value, depth=0):
+    def visit(value, depth=0, inherited_currency=""):
         if depth > 5:
             return None
         if isinstance(value, (dict, list, tuple)):
@@ -4854,9 +4858,18 @@ def reported_generation_cost(raw):
                 return None
             seen.add(marker)
         if isinstance(value, dict):
-            currency = next((str(value.get(key) or "").strip().upper() for key in currency_keys if value.get(key) is not None), "")
-            if currency == "¥":
+            currency = next((str(value.get(key) or "").strip().upper() for key in currency_keys if value.get(key) is not None), inherited_currency)
+            if currency in {"¥", "￥"}:
                 currency = "CNY"
+            if currency in {"$", "US$"}:
+                currency = "USD"
+            nested_currency = value.get("billing") or value.get("price") if isinstance(value.get("billing") or value.get("price"), dict) else None
+            if not currency and nested_currency:
+                currency = next((str(nested_currency.get(key) or "").strip().upper() for key in currency_keys if nested_currency.get(key) is not None), "")
+                if currency in {"¥", "￥"}:
+                    currency = "CNY"
+                elif currency in {"$", "US$"}:
+                    currency = "USD"
             if currency in allowed_currency:
                 for key in cost_keys:
                     if value.get(key) is None:
@@ -4870,16 +4883,16 @@ def reported_generation_cost(raw):
             preferred = ("usage", "billing", "cost", "data", "result", "meta", "metadata")
             for key in preferred:
                 if key in value:
-                    found = visit(value.get(key), depth + 1)
+                    found = visit(value.get(key), depth + 1, currency)
                     if found:
                         return found
             for child in value.values():
-                found = visit(child, depth + 1)
+                found = visit(child, depth + 1, currency)
                 if found:
                     return found
         elif isinstance(value, (list, tuple)):
             for child in value:
-                found = visit(child, depth + 1)
+                found = visit(child, depth + 1, inherited_currency)
                 if found:
                     return found
         return None
@@ -4898,7 +4911,9 @@ def generation_cost_for_results(raw_items, provider, model, kind="image", count=
             "source": "reported",
             "count": len(reported),
         }
-    return central_catalog_generation_cost(provider, model, kind, count) or configured_generation_cost(provider, model, kind, count)
+    # A local/provider price table is not an automatic charge source.
+    # Unknown providers must stay unknown instead of inheriting another API's rate.
+    return None
 
 def attach_generation_cost(result, provider, model, kind="image", count=1):
     """Attach cost metadata without changing the provider-specific response shape."""
@@ -4913,6 +4928,7 @@ def attach_generation_cost(result, provider, model, kind="image", count=1):
 AUTO_BILLING_GROUPS = {}
 AUTO_BILLING_SUPPORT_CACHE = {}
 AUTO_BILLING_STATUS_CACHE = {}
+AUTO_BILLING_LAST_STATE = {}
 AUTO_BILLING_CACHE_SECONDS = 300
 
 def provider_billing_root_candidates(provider):
@@ -4921,10 +4937,10 @@ def provider_billing_root_candidates(provider):
         return []
     parsed = urllib.parse.urlparse(base)
     origin = f"{parsed.scheme}://{parsed.netloc}"
-    roots = [base]
+    roots = [origin]
     if base.lower().endswith("/v1"):
         roots.append(base[:-3].rstrip("/"))
-    roots.append(origin)
+    roots.append(base)
     return list(dict.fromkeys(root for root in roots if root))
 
 def provider_auto_billing_group(provider):
@@ -4936,12 +4952,86 @@ def provider_auto_billing_group(provider):
     return group
 
 def billing_currency_from_status(status):
-    symbol = str((status or {}).get("custom_currency_symbol") or "").strip().upper()
+    status = status if isinstance(status, dict) else {}
+    display_type = str(status.get("quota_display_type") or "").strip().upper()
+    if display_type == "CNY":
+        return "CNY"
+    if display_type == "USD":
+        return "USD"
+    if display_type == "TOKENS":
+        return ""
+    symbol = str(
+        status.get("custom_currency_symbol")
+        or status.get("currency")
+        or status.get("billing_currency")
+        or status.get("currency_code")
+        or ""
+    ).strip().upper()
     if symbol in {"¥", "￥", "RMB", "CNY", "CNH"} or "¥" in symbol or "￥" in symbol:
         return "CNY"
     if symbol in {"$", "USD", "US$"}:
         return "USD"
-    return "CNY" if (status or {}).get("display_in_currency") else "USD"
+    return "CNY" if status.get("display_in_currency") else ""
+
+
+def _first_number(value, keys):
+    """Find the first finite non-negative numeric field in a mapping."""
+    if not isinstance(value, dict):
+        return None, None
+    for key in keys:
+        raw = value.get(key)
+        if isinstance(raw, bool) or raw is None:
+            continue
+        try:
+            number = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number) and number >= 0:
+            return number, key
+    return None, None
+
+
+def _find_usage_mapping(value, depth=0):
+    """Locate a cumulative usage/charge mapping in common proxy responses."""
+    if depth > 6:
+        return None
+    if isinstance(value, dict):
+        used, used_key = _first_number(value, ("total_used", "used_quota", "used", "usage", "total_usage", "quota_used"))
+        if used is not None:
+            return {"used": used, "used_key": used_key, "data": value}
+        for key in ("data", "result", "usage", "billing", "quota", "account", "user"):
+            if key in value:
+                found = _find_usage_mapping(value.get(key), depth + 1)
+                if found:
+                    return found
+    return None
+
+
+def billing_snapshot_from_payload(payload, status=None):
+    """Normalize cumulative monetary usage, including New API token usage."""
+    found = _find_usage_mapping(payload)
+    if not found:
+        return None
+    data = found["data"]
+    currency = billing_currency_from_status(data) or billing_currency_from_status(status)
+    used = found["used"]
+    # New API reports internal quota units. Its public status endpoint exposes
+    # quota_per_unit (quota for 1 USD) and, for CNY display, usd_exchange_rate.
+    amount, amount_key = _first_number(data, ("total_cost", "cost", "charged_amount", "amount_charged", "total_price", "price"))
+    if amount is not None and currency:
+        return {"total_amount": amount, "currency": currency, "scale": 1.0, "source": "billing_total"}
+    quota_per_unit, _ = _first_number(data, ("quota_per_unit", "quotaPerUnit"))
+    if quota_per_unit is None and isinstance(status, dict):
+        quota_per_unit, _ = _first_number(status, ("quota_per_unit", "quotaPerUnit"))
+    if quota_per_unit and quota_per_unit > 0 and currency:
+        amount = used / quota_per_unit
+        if currency == "CNY":
+            exchange_rate, _ = _first_number(status, ("usd_exchange_rate", "usdExchangeRate", "custom_currency_exchange_rate"))
+            if exchange_rate is None or exchange_rate <= 0:
+                return {"total_quota": used, "currency": currency, "source": "billing_quota"}
+            amount *= exchange_rate
+        return {"total_amount": amount, "currency": currency, "scale": quota_per_unit, "source": "billing_quota_converted"}
+    return {"total_quota": used, "currency": currency or None, "source": "billing_quota"}
 
 async def provider_billing_status(client, root):
     now = time.monotonic()
@@ -4962,7 +5052,7 @@ async def provider_billing_status(client, root):
     return status
 
 async def provider_billing_snapshot(provider, force=False):
-    """Read OpenAI-dashboard compatible cumulative usage without making a model call."""
+    """Read an upstream cumulative charge/usage snapshot without a model call."""
     roots = provider_billing_root_candidates(provider)
     provider_id = str((provider or {}).get("id") or "")
     if provider_id in {"modelscope", "runninghub", "volcengine", "jimeng", "codex", "gemini-cli"}:
@@ -4976,37 +5066,71 @@ async def provider_billing_snapshot(provider, force=False):
     cached_support = AUTO_BILLING_SUPPORT_CACHE.get(provider_id)
     if not force and cached_support and cached_support[0] > now and cached_support[1] is False:
         return None
-    today = datetime.date.today()
-    start_date = today - datetime.timedelta(days=1)
-    end_date = today + datetime.timedelta(days=1)
     headers = api_headers(provider=provider)
     timeout = httpx.Timeout(connect=5.0, read=8.0, write=5.0, pool=5.0)
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         for root in roots:
-            for prefix in ("/v1/dashboard/billing/usage", "/dashboard/billing/usage"):
+            status = await provider_billing_status(client, root)
+            endpoints = (
+                ("/v1/dashboard/billing/usage", {"start_date": (datetime.date.today() - datetime.timedelta(days=1)).isoformat(), "end_date": (datetime.date.today() + datetime.timedelta(days=1)).isoformat()}),
+                ("/dashboard/billing/usage", {"start_date": (datetime.date.today() - datetime.timedelta(days=1)).isoformat(), "end_date": (datetime.date.today() + datetime.timedelta(days=1)).isoformat()}),
+                ("/api/usage/token/", None),
+                ("/api/usage/token", None),
+                ("/api/token/usage", None),
+                ("/api/user/self", None),
+                ("/api/user/quota", None),
+                ("/api/usage", None),
+            )
+            for prefix, params in endpoints:
                 try:
                     response = await client.get(
                         f"{root}{prefix}",
                         headers=headers,
-                        params={"start_date": start_date.isoformat(), "end_date": end_date.isoformat()},
+                        params=params,
                     )
                     if response.status_code != 200:
                         continue
                     payload = response.json()
-                    total_minor = float(payload.get("total_usage")) if isinstance(payload, dict) else math.nan
-                    if not math.isfinite(total_minor) or total_minor < 0:
+                    # OpenAI's dashboard endpoint defines total_usage as USD cents.
+                    # This is an explicit upstream unit, so it is safe to convert.
+                    if prefix in {"/v1/dashboard/billing/usage", "/dashboard/billing/usage"} and isinstance(payload, dict):
+                        total_usage, _ = _first_number(payload, ("total_usage",))
+                        if total_usage is not None:
+                            AUTO_BILLING_SUPPORT_CACHE[provider_id] = (now + AUTO_BILLING_CACHE_SECONDS, True)
+                            snapshot = {
+                                "total_amount": total_usage / 100.0,
+                                "currency": billing_currency_from_status(status) or "USD",
+                                "scale": 0.01,
+                                "source": "openai_dashboard",
+                            }
+                            AUTO_BILLING_LAST_STATE[provider_id] = "billing_available"
+                            return snapshot
+                    snapshot = billing_snapshot_from_payload(payload, status)
+                    if not snapshot:
                         continue
-                    status = await provider_billing_status(client, root)
                     AUTO_BILLING_SUPPORT_CACHE[provider_id] = (now + AUTO_BILLING_CACHE_SECONDS, True)
-                    return {
-                        "total_minor": total_minor,
-                        "currency": billing_currency_from_status(status),
-                        "minor_scale": 100.0,
-                    }
+                    AUTO_BILLING_LAST_STATE[provider_id] = "quota_only" if snapshot.get("total_amount") is None else "billing_available"
+                    return snapshot
                 except Exception:
                     continue
     AUTO_BILLING_SUPPORT_CACHE[provider_id] = (now + AUTO_BILLING_CACHE_SECONDS, False)
+    AUTO_BILLING_LAST_STATE[provider_id] = "unavailable"
     return None
+
+
+def generation_cost_status(provider, cost=None):
+    """Return a truthful UI status for automatic fee detection."""
+    if cost:
+        if cost.get("method") == "billing_delta":
+            return "已按上游账单差额自动计算"
+        return "已读取上游实际扣费"
+    provider_id = str((provider or {}).get("id") or (provider or {}).get("base_url") or "default")
+    state = AUTO_BILLING_LAST_STATE.get(provider_id)
+    if state == "quota_only":
+        return "已检测到上游额度，但接口未提供货币换算规则"
+    if state == "billing_available":
+        return "已检测账单接口，但本次未返回可分配的费用差额"
+    return "该接口未提供费用信息，暂时无法自动计算"
 
 async def finalize_automatic_billing_group(provider, group):
     members = list(group.get("members") or [])
@@ -5026,14 +5150,25 @@ async def finalize_automatic_billing_group(provider, group):
                 await asyncio.sleep(delay)
             after = await provider_billing_snapshot(provider, force=True)
             if after and after.get("currency") == before.get("currency"):
-                if float(after.get("total_minor") or 0) > float(before.get("total_minor") or 0) + 1e-9:
+                before_value = before.get("total_amount") if before.get("total_amount") is not None else before.get("total_quota")
+                after_value = after.get("total_amount") if after.get("total_amount") is not None else after.get("total_quota")
+                if before_value is not None and after_value is not None and float(after_value) > float(before_value) + 1e-9:
                     break
         if after and after.get("currency") == before.get("currency"):
-            delta_minor = float(after.get("total_minor") or 0) - float(before.get("total_minor") or 0)
-            if delta_minor > 1e-9:
+            before_value = before.get("total_amount") if before.get("total_amount") is not None else before.get("total_quota")
+            after_value = after.get("total_amount") if after.get("total_amount") is not None else after.get("total_quota")
+            if before_value is not None and after_value is not None:
+                delta = float(after_value) - float(before_value)
+            else:
+                delta = 0.0
+            # A quota-only response has no currency conversion and must not be
+            # presented as a CNY amount.
+            if delta > 1e-9 and after.get("total_amount") is not None and after.get("currency"):
                 automatic_total = {
-                    "amount": max(0.0, delta_minor / float(after.get("minor_scale") or 100.0)),
-                    "currency": after.get("currency") or "CNY",
+                    "amount": round(delta, 6),
+                    "currency": after.get("currency"),
+                    "source": "reported",
+                    "method": "billing_delta",
                 }
 
     unresolved = [member for member in members if not member.get("reported")]
@@ -5072,7 +5207,9 @@ async def run_with_automatic_billing(provider, operation, weight=1.0):
         group["members"].append(member)
     try:
         result = await operation()
-        member["reported"] = reported_generation_cost(result)
+        # Batch image generation is summed by generation_cost_for_results after
+        # this wrapper. Do not keep only the first reported charge.
+        member["reported"] = None if float(weight or 1) > 1 else reported_generation_cost(result)
         if member["reported"]:
             member["reported"]["count"] = 1
     except Exception:
@@ -5087,6 +5224,8 @@ async def run_with_automatic_billing(provider, operation, weight=1.0):
         if group["active"] == 0:
             await finalize_automatic_billing_group(provider, group)
     automatic_cost = await member["future"]
+    if isinstance(result, dict) and not automatic_cost and not result.get("generation_cost"):
+        result["generation_cost_status"] = generation_cost_status(provider)
     return result, automatic_cost
 
 def effective_protocol(provider, model=""):
@@ -14303,6 +14442,7 @@ async def build_online_image_result(payload: OnlineImageRequest):
         "params": {"provider_id": provider["id"], "model": model, "size": request_size, "requested_size": payload.size, "quality": payload.quality, "n": count, "reference_images": refs},
         "raw_usage": raw.get("usage") if isinstance(raw, dict) else None,
         "generation_cost": generation_cost,
+        "generation_cost_status": generation_cost_status(provider, generation_cost),
     }
     save_to_history(result)
     if GLOBAL_LOOP:

@@ -101,33 +101,7 @@ let portDragState = null;
 let connectionEraseState = null;
 let saveTimer = null;
 let apiProviders = [];
-const BUILTIN_MODEL_PRICE_CATALOG = {
-    schema_version:1,
-    currency:'CNY',
-    providers:[{
-        id:'xiaoqi-api',
-        provider_ids:['lingjing'],
-        base_urls:['https://api.lvziai.xyz','https://api.lvziai.xyz/v1'],
-        prices:{image:{'gpt-image-2-CH副1':0.04,'gpt-image-2-1-4k稳副':0.12},chat:{'DeepSeek-V4-Flash[free]':0},video:{}}
-    }]
-};
-let centralModelPriceCatalog = BUILTIN_MODEL_PRICE_CATALOG;
-function withBuiltinModelPriceCatalog(value){
-    const source = value && typeof value === 'object' ? value : {};
-    const providers = Array.isArray(source.providers) ? source.providers.map(item => ({...item, prices:{...(item.prices || {})}})) : [];
-    const fallback = BUILTIN_MODEL_PRICE_CATALOG.providers[0];
-    const match = providers.find(item => {
-        const ids = (item.provider_ids || []).map(id => String(id).toLowerCase());
-        const bases = (item.base_urls || []).map(url => String(url).replace(/\/+$/, '').toLowerCase());
-        return ids.includes('lingjing') || bases.includes('https://api.lvziai.xyz');
-    });
-    if(match){
-        match.provider_ids = [...new Set([...(match.provider_ids || []), ...fallback.provider_ids])];
-        match.base_urls = [...new Set([...(match.base_urls || []), ...fallback.base_urls])];
-        match.prices = {image:{...fallback.prices.image,...(match.prices.image || {})},chat:{...fallback.prices.chat,...(match.prices.chat || {})},video:{...fallback.prices.video,...(match.prices.video || {})}};
-    } else providers.push({...fallback, prices:{image:{...fallback.prices.image},chat:{...fallback.prices.chat},video:{...fallback.prices.video}}});
-    return {...BUILTIN_MODEL_PRICE_CATALOG,...source,currency:source.currency || 'CNY',providers};
-}
+let centralModelPriceCatalog = {schema_version:1, currency:'CNY', providers:[]};
 let comfyWorkflows = [];
 let comfyInstanceCount = 1;
 let assetLibrary = {categories:[]};
@@ -2543,43 +2517,16 @@ function smartCatalogProviderMatches(providerId, provider, entry){
     return raw && (entry?.base_urls || []).some(value => raw === String(value || '').trim().replace(/\/+$/, '').toLowerCase());
 }
 function smartProviderModelPriceInfo(providerId, model, kind='image'){
-    const provider = (apiProviders || []).find(p => p.id === providerId);
-    const modelName = String(model || '').trim();
-    for(const entry of (centralModelPriceCatalog?.providers || [])){
-        if(!smartCatalogProviderMatches(providerId, provider, entry)) continue;
-        const prices = entry?.prices?.[kind] || {};
-        const key = Object.keys(prices).find(name => String(name).toLowerCase() === modelName.toLowerCase());
-        const value = key === undefined ? NaN : Number(prices[key]);
-        if(Number.isFinite(value) && value >= 0) return {price:value, source:'catalog'};
-    }
-    const prices = provider?.model_prices?.[kind];
-    const value = prices && Object.prototype.hasOwnProperty.call(prices, modelName)
-        ? Number(prices[modelName])
-        : NaN;
-    return Number.isFinite(value) && value >= 0 ? {price:value, source:'estimated'} : null;
+    return null;
 }
 function smartProviderModelUnitPrice(providerId, model, kind='image'){
     return smartProviderModelPriceInfo(providerId, model, kind)?.price ?? null;
 }
 function smartEstimatedGenerationCost(sourceSettings=settings, count=1, kind='image'){
-    const source = sourceSettings || settings;
-    const providerId = kind === 'video' ? source.videoProvider : source.provider_id;
-    const model = kind === 'video' ? source.videoModel : source.model;
-    const priceInfo = smartProviderModelPriceInfo(providerId, model, kind);
-    if(!priceInfo) return null;
-    const unitPrice = priceInfo.price;
-    const amountCount = Math.max(1, Number(count) || 1);
-    return {amount:unitPrice * amountCount, currency:String(centralModelPriceCatalog?.currency || 'CNY').toUpperCase(), source:priceInfo.source, count:amountCount, unit_price:unitPrice};
+    return null;
 }
 function smartCostEstimateContent(sourceSettings=settings, kind='image'){
-    const source = sourceSettings || settings;
-    const count = kind === 'video' ? 1 : Math.max(1, Number(source.count) || 1);
-    const estimate = smartEstimatedGenerationCost(source, count, kind);
-    if(!estimate) return '<span>费用估算</span><strong>暂未收录费率</strong><em>系统会自动读取上游实际扣费或项目统一费率</em>';
-    const unit = formatSmartGenerationCost({...estimate, amount:estimate.unit_price, count:1}, {compact:true});
-    const total = formatSmartGenerationCost(estimate, {compact:true});
-    const label = kind === 'video' ? '本次' : `本次 ${estimate.count} 张`;
-    return `<span>费用估算</span><strong>单次 ${escapeHtml(unit)} · ${label} ${escapeHtml(total)}</strong><em>按当前 API 费率估算，实际扣费以上游返回为准</em>`;
+    return '<span>费用</span><strong>等待上游返回实际扣费</strong><em>不会套用其他接口的价格；如果接口不提供扣费或账单信息，将显示无法自动计算</em>';
 }
 function smartCostEstimateHtml(sourceSettings=settings, kind='image'){
     return `<div class="smart-cost-estimate" data-smart-cost-estimate="1">${smartCostEstimateContent(sourceSettings, kind)}</div>`;
@@ -4433,7 +4380,9 @@ async function loadConfig(){
     try {
         const cfg = await fetch('/api/config').then(r => r.json());
         apiProviders = Array.isArray(cfg.api_providers) ? cfg.api_providers : [];
-        centralModelPriceCatalog = withBuiltinModelPriceCatalog(cfg.model_price_catalog);
+        centralModelPriceCatalog = cfg.model_price_catalog && typeof cfg.model_price_catalog === 'object'
+            ? cfg.model_price_catalog
+            : {schema_version:1, currency:'CNY', providers:[]};
         comfyInstanceCount = Math.max(1, (Array.isArray(cfg.comfy_instances) ? cfg.comfy_instances : []).filter(Boolean).length || 1);
         // 提供商配置已就绪即先渲染参数面板，避免等工作流/RunningHub 预取完成后参数才「突然刷新出来」。
         sanitizeSmartApiSelection(settings);
@@ -7113,9 +7062,13 @@ function smartRunRequestMeta(run){
         refs:s.refCount || 0
     };
     if(s.engine === 'modelscope') return {backend:'Modelscope', model:s.msgenModel || '', custom_model:s.msCustomModel || ''};
-    if(run?.kind === 'chat') return {provider_id:s.provider_id || '', model:s.model || ''};
-    if(run?.kind === 'video') return {provider_id:s.videoProvider || '', model:s.videoModel || '', duration:s.videoDuration || '', aspect_ratio:s.videoAspect || '', resolution:s.videoResolution || ''};
-    return {provider_id:s.provider_id || '', model:s.model || '', size:run?.size || '', quality:s.quality || '', n:s.count || 1};
+    const meta = run?.kind === 'chat'
+        ? {provider_id:s.provider_id || '', model:s.model || ''}
+        : run?.kind === 'video'
+            ? {provider_id:s.videoProvider || '', model:s.videoModel || '', duration:s.videoDuration || '', aspect_ratio:s.videoAspect || '', resolution:s.videoResolution || ''}
+            : {provider_id:s.provider_id || '', model:s.model || '', size:run?.size || '', quality:s.quality || '', n:s.count || 1};
+    if(run?.generationCostStatus) meta.generation_cost_status = run.generationCostStatus;
+    return meta;
 }
 function smartRunSnapshot(node, prompt, refs=[], kind='image'){
     const settingsSnapshot = cloneSmartSettings(settings);
@@ -7133,10 +7086,12 @@ function normalizeSmartGenerationCost(value){
     if(!value || typeof value !== 'object') return null;
     const amount = Number(value.amount);
     if(!Number.isFinite(amount) || amount < 0) return null;
+    // Only upstream-reported money is authoritative. Hide legacy local/catalog estimates.
+    if(value.source !== 'reported') return null;
     return {
         amount,
         currency:String(value.currency || 'CNY').toUpperCase(),
-        source:value.source === 'reported' ? 'reported' : value.source === 'catalog' ? 'catalog' : 'estimated',
+        source:'reported',
         count:Math.max(1, Number(value.count || 1)),
         unit_price:Number.isFinite(Number(value.unit_price)) ? Number(value.unit_price) : undefined
     };
@@ -7159,7 +7114,7 @@ function formatSmartGenerationCost(cost, options={}){
     if(!item) return '';
     const symbol = ['CNY','RMB','CNH'].includes(item.currency) ? '¥' : item.currency === 'USD' ? '$' : `${item.currency} `;
     const digits = item.amount >= 1 ? 2 : item.amount >= 0.01 ? 3 : 4;
-    const prefix = item.source === 'reported' ? '' : (options.compact ? '约' : item.source === 'catalog' ? '统一估算 ' : '本机估算 ');
+    const prefix = item.source === 'reported' ? '' : '';
     return `${prefix}${symbol}${item.amount.toFixed(digits)}`;
 }
 function smartCostPeriodStart(period='today'){
@@ -7192,7 +7147,7 @@ function smartCanvasCostTotals(logs=smartCostLogs('all'), source='all'){
             videoModel:request.model || ''
         };
         const cost = normalizeSmartGenerationCost(log.generationCost || request.generation_cost)
-            || smartEstimatedGenerationCost(sourceSettings, 1, log.kind === 'video' ? 'video' : 'image');
+            || null;
         if(!cost) return;
         const matchesSource = source === 'all'
             || cost.source === source
@@ -7248,7 +7203,7 @@ function refreshSmartCostSummary(){
     const el = document.getElementById('smartCostSummary');
     if(!el) return;
     const logs = smartCostLogs('today');
-    const parts = smartFormatCostTotals(smartCanvasCostTotals(logs), '未设置费率');
+    const parts = smartFormatCostTotals(smartCanvasCostTotals(logs), '上游未提供费用信息');
     el.textContent = `今日 ${parts} · ${logs.length}次`;
     el.title = '点击查看今日、近7天、本月和全部费用统计';
     initSmartCostStats();
@@ -7282,8 +7237,8 @@ function addSmartGenerationLog({run, outputs=[], runMs=0, error=''}) {
         outputs:outputItems,
         refs:run?.refs || [],
         runMs:Number(runMs || 0),
-        generationCost:error ? null : (normalizeSmartGenerationCost(run?.generationCost)
-            || smartEstimatedGenerationCost(run?.settings || {}, outputItems.length || run?.settings?.count || 1, run?.kind === 'video' ? 'video' : 'image')),
+        generationCost:error ? null : normalizeSmartGenerationCost(run?.generationCost),
+        generationCostStatus:error ? '' : (run?.generationCostStatus || ''),
         error:error ? String(error) : ''
     };
     canvas.logs = [entry, ...canvas.logs].slice(0, 500);
@@ -7399,7 +7354,7 @@ function renderSmartCanvasLog(){
                     <span class="log-chip">${escapeHtml(log.platform || '-')}</span>
                     ${log.model ? `<span class="log-chip">${escapeHtml(log.model)}</span>` : ''}
                     <span class="log-chip">${escapeHtml(formatRunDuration(log.runMs || 0))}</span>
-                    ${log.generationCost ? `<span class="log-chip cost-chip" title="${log.generationCost.source === 'reported' ? '上游返回的实际费用' : log.generationCost.source === 'catalog' ? '按项目统一费率自动估算' : '按本机备用费率估算'}">${escapeHtml(formatSmartGenerationCost(log.generationCost))}</span>` : ''}
+                    ${log.generationCost ? `<span class="log-chip cost-chip" title="上游实际扣费">${escapeHtml(formatSmartGenerationCost(log.generationCost))}</span>` : (log.generationCostStatus ? `<span class="log-chip cost-status-chip" title="${escapeAttr(log.generationCostStatus)}">${escapeHtml(log.generationCostStatus)}</span>` : '')}
                 </div>
                 <div class="log-subline">${subParts.map(part => `<span title="${escapeAttr(part)}">${escapeHtml(part)}</span>`).join('')}</div>
                 ${log.error ? `<div class="log-error" title="${escapeAttr(log.error)}" data-error="${escapeAttr(log.error)}">${escapeHtml(log.error)}</div>` : ''}
@@ -8579,10 +8534,9 @@ function runCostPillHtml(node){
         : settings;
     const kind = node?.outputKind === 'video' || sourceSettings?.apiKind === 'video' ? 'video' : node?.type === 'smart-prompt' ? 'chat' : 'image';
     const fallbackCount = kind === 'video' ? 1 : Math.max(1, Number(sourceSettings?.count || node?.images?.length || 1));
-    const cost = normalizeSmartGenerationCost(node?.generationCost)
-        || smartEstimatedGenerationCost(sourceSettings, fallbackCount, kind);
-    if(!cost) return '';
-    return `<span class="run-cost-pill ${cost.source === 'reported' ? 'reported' : cost.source === 'catalog' ? 'catalog' : 'estimated'}" title="${cost.source === 'reported' ? '上游返回的实际费用' : cost.source === 'catalog' ? '按项目统一费率自动估算' : '按本机备用费率估算'}">${escapeHtml(formatSmartGenerationCost(cost, {compact:true}))}</span>`;
+    const cost = normalizeSmartGenerationCost(node?.generationCost);
+    if(cost) return `<span class="run-cost-pill reported" title="上游实际扣费">${escapeHtml(formatSmartGenerationCost(cost, {compact:true}))}</span>`;
+    return node?.generationCostStatus ? `<span class="run-cost-pill status" title="${escapeAttr(node.generationCostStatus)}">${escapeHtml(node.generationCostStatus)}</span>` : '';
 }
 function hideRunTimerForNode(node){
     if(!node || node.runTimerHidden || node.pending || node.running || node.jimengPending || !node.runFinishedAt) return false;
@@ -15683,10 +15637,11 @@ async function generateUrlsForCurrentSettings(node, prompt, refs, runSettings=se
             const settled = await Promise.all(taskIds.map(taskId => pollSmartCanvasTask(taskId)));
             const urls = settled.flatMap(result => resultMediaUrls(result?.image_items?.length ? result.image_items : (result?.images?.length ? result.images : result))).filter(Boolean);
             const generationCost = settled.reduce((total, result) => mergeSmartGenerationCost(total, result?.generation_cost), null);
-            return {urls, kind:mediaKindForUrls(urls, 'image'), generationCost};
+            const generationCostStatus = settled.find(result => result?.generation_cost_status)?.generation_cost_status || '';
+            return {urls, kind:mediaKindForUrls(urls, 'image'), generationCost, generationCostStatus};
         }
         const urls = resultMediaUrls(taskResult);
-        return {urls, kind:mediaKindForUrls(urls, 'image'), generationCost:normalizeSmartGenerationCost(taskResult?.generation_cost)};
+        return {urls, kind:mediaKindForUrls(urls, 'image'), generationCost:normalizeSmartGenerationCost(taskResult?.generation_cost), generationCostStatus:taskResult?.generation_cost_status || ''};
     }
     if(isApiLikeEngine(activeSettings.engine) && activeSettings.apiKind === 'video'){
         const videoResult = await runApiVideoGeneration(prompt, refs, activeSettings);
@@ -15699,10 +15654,11 @@ async function generateUrlsForCurrentSettings(node, prompt, refs, runSettings=se
             const settled = await Promise.all(taskIds.map(taskId => pollSmartCanvasTask(taskId)));
             const urls = settled.flatMap(result => resultMediaUrls(result?.image_items?.length ? result.image_items : (result?.images?.length ? result.images : result))).filter(Boolean);
             const generationCost = settled.reduce((total, result) => mergeSmartGenerationCost(total, result?.generation_cost), null);
-            return {urls, kind:mediaKindForUrls(urls, 'image'), generationCost};
+            const generationCostStatus = settled.find(result => result?.generation_cost_status)?.generation_cost_status || '';
+            return {urls, kind:mediaKindForUrls(urls, 'image'), generationCost, generationCostStatus};
         }
         const urls = resultMediaUrls(taskResult);
-        return {urls, kind:mediaKindForUrls(urls, 'image'), generationCost:normalizeSmartGenerationCost(taskResult?.generation_cost)};
+        return {urls, kind:mediaKindForUrls(urls, 'image'), generationCost:normalizeSmartGenerationCost(taskResult?.generation_cost), generationCostStatus:taskResult?.generation_cost_status || ''};
     }
     const urls = activeSettings.engine === 'runninghub'
         ? await runRunningHubGeneration(prompt, refs, activeSettings)
@@ -15830,10 +15786,10 @@ async function runCascadeStepIntoNode(sourceNode, targetNode, inputRefs, ctx=sma
         if(!result.urls?.length) throw new Error(result.kind === 'video' ? tr('smart.errNoOutVideos') : tr('smart.errNoOutImages'));
         if(outpaintSize) delete requestNode.outpaintSize;
         const resultKind = result.kind || logKind;
-        const resolvedCost = normalizeSmartGenerationCost(result.generationCost)
-            || smartEstimatedGenerationCost(runSettings, result.urls.length || runSettings.count || 1, resultKind);
+        const resolvedCost = normalizeSmartGenerationCost(result.generationCost);
         outputNode.generationCost = resolvedCost;
-        addSmartGenerationLog({run:{...runLog, kind:resultKind, settings:runSettings, generationCost:resolvedCost}, outputs:result.urls, runMs:nowMs() - runLogStart});
+        outputNode.generationCostStatus = result.generationCostStatus || '';
+        addSmartGenerationLog({run:{...runLog, kind:resultKind, settings:runSettings, generationCost:resolvedCost, generationCostStatus:result.generationCostStatus || ''}, outputs:result.urls, runMs:nowMs() - runLogStart});
         const ext = result.kind === 'video' ? 'mp4' : result.kind === 'audio' ? 'mp3' : result.kind === 'text' ? 'txt' : 'png';
         const additions = result.urls.map((item, i) => {
             const url = typeof item === 'string' ? item : item?.url || '';
@@ -15969,10 +15925,10 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
             scheduleConnectionLayerRefresh();
         }
         const resultKind = result.kind || logKind;
-        const resolvedCost = normalizeSmartGenerationCost(result.generationCost)
-            || smartEstimatedGenerationCost(runSettings, result.urls.length || expectedCount, resultKind);
+        const resolvedCost = normalizeSmartGenerationCost(result.generationCost);
         outputSlot.generationCost = resolvedCost;
-        addSmartGenerationLog({run:{...runLog, kind:resultKind, settings:runSettings, generationCost:resolvedCost}, outputs:result.urls, runMs:nowMs() - runLogStart});
+        outputSlot.generationCostStatus = result.generationCostStatus || '';
+        addSmartGenerationLog({run:{...runLog, kind:resultKind, settings:runSettings, generationCost:resolvedCost, generationCostStatus:result.generationCostStatus || ''}, outputs:result.urls, runMs:nowMs() - runLogStart});
         return rememberRoundOutputs(ctx, outputSlot, additions);
     } catch(e) {
         if(handleJimengPendingSignal(outputSlot, e)){
@@ -16371,8 +16327,7 @@ async function runGeneration(){
             const videoResult = await runApiVideoGeneration(prompt, refs);
             const outVideos = videoResult.urls;
             if(!outVideos.length) throw new Error(tr('smart.errNoOutVideos'));
-            const resolvedVideoCost = normalizeSmartGenerationCost(videoResult.generationCost)
-                || smartEstimatedGenerationCost(settings, 1, 'video');
+            const resolvedVideoCost = normalizeSmartGenerationCost(videoResult.generationCost);
             pendingNode.generationCost = resolvedVideoCost;
             runLog.generationCost = resolvedVideoCost;
             finalizePendingNode(pendingNode, outVideos, pendingMeta, 'video');
@@ -16497,8 +16452,7 @@ async function runPromptLLMNode(nodeId){
         node.text = (result.text || '').trim();
         node.llmProvider = provider;
         node.llmModel = model;
-        node.generationCost = normalizeSmartGenerationCost(result.generation_cost)
-            || smartEstimatedGenerationCost({engine:'api', provider_id:provider, model}, 1, 'chat');
+        node.generationCost = normalizeSmartGenerationCost(result.generation_cost);
         addSmartGenerationLog({
             run:{
                 nodeId:node.id,
@@ -17362,7 +17316,7 @@ async function pollSmartCanvasTask(taskId){
         activeSmartTaskPolls.delete(taskId);
     }
 }
-function finalizeSmartPendingTask(node, taskId, images, kind='image', generationCost=null){
+function finalizeSmartPendingTask(node, taskId, images, kind='image', generationCost=null, generationCostStatus=''){
     if(!node || !taskId) return;
     const pendingTask = smartPendingTasks(node).find(task => task.taskId === taskId);
     node.pendingTasks = smartPendingTasks(node).filter(task => task.taskId !== taskId);
@@ -17385,9 +17339,9 @@ function finalizeSmartPendingTask(node, taskId, images, kind='image', generation
     const fallbackSettings = node.runSettings && Object.keys(node.runSettings).length
         ? node.runSettings
         : {engine:'api', apiKind:kind === 'video' ? 'video' : 'image', provider_id:pendingTask?.providerId || '', model:pendingTask?.model || '', count:1};
-    const resolvedCost = normalizeSmartGenerationCost(generationCost)
-        || smartEstimatedGenerationCost(fallbackSettings, 1, kind);
+    const resolvedCost = normalizeSmartGenerationCost(generationCost);
     node.generationCost = mergeSmartGenerationCost(node.generationCost, resolvedCost);
+    if(generationCostStatus) node.generationCostStatus = generationCostStatus;
     if(additions.length) node.outputKind = kind;
     if(!node.pending && smartPendingTasks(node).length === 0){
         delete node.pendingTasks;
@@ -17424,7 +17378,7 @@ async function resumeSmartPendingNode(node, logContext={}){
         if(task.failed && task.recoverTaskId) return;
         try {
             const result = await pollSmartCanvasTask(task.taskId);
-            finalizeSmartPendingTask(node, task.taskId, resultMediaUrls(result?.image_items?.length ? result.image_items : (result?.images?.length ? result.images : result)), task.kind || 'image', result?.generation_cost);
+            finalizeSmartPendingTask(node, task.taskId, resultMediaUrls(result?.image_items?.length ? result.image_items : (result?.images?.length ? result.images : result)), task.kind || 'image', result?.generation_cost, result?.generation_cost_status || '');
             render();
             scheduleSave();
         } catch(e) {
