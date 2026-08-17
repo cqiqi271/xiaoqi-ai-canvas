@@ -7167,7 +7167,11 @@ function smartCanvasCostTotals(logs=smartCostLogs('all'), source='all'){
         };
         const cost = normalizeSmartGenerationCost(log.generationCost || request.generation_cost)
             || smartEstimatedGenerationCost(sourceSettings, 1, log.kind === 'video' ? 'video' : 'image');
-        if(!cost || (source !== 'all' && cost.source !== source)) return;
+        if(!cost) return;
+        const matchesSource = source === 'all'
+            || cost.source === source
+            || (source === 'estimated' && cost.source === 'catalog');
+        if(!matchesSource) return;
         totals[cost.currency] = (totals[cost.currency] || 0) + cost.amount;
     });
     return totals;

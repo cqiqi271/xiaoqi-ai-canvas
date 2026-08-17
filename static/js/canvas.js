@@ -13524,7 +13524,11 @@ function canvasCostTotals(logs=canvasCostLogs('all'), source='all'){
     (logs || []).forEach(log => {
         const cost = normalizeGenerationCost(log.generationCost || log.request?.generation_cost)
             || estimatedGenerationCost(log.request?.provider_id || '', log.request?.model || log.model || '', 1, 'image');
-        if(!cost || (source !== 'all' && cost.source !== source)) return;
+        if(!cost) return;
+        const matchesSource = source === 'all'
+            || cost.source === source
+            || (source === 'estimated' && cost.source === 'catalog');
+        if(!matchesSource) return;
         totals[cost.currency] = (totals[cost.currency] || 0) + cost.amount;
     });
     return totals;
