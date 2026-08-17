@@ -162,7 +162,7 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 GLOBAL_LOOP = None
-APP_VERSION = "2026.08.07.8"
+APP_VERSION = "2026.08.07.9"
 GITHUB_REPO_URL = "https://github.com/cqiqi271/xiaoqi-ai-canvas"
 GITHUB_VERSION_URL = "https://raw.githubusercontent.com/cqiqi271/xiaoqi-ai-canvas/main/VERSION"
 GITHUB_TREE_URL = "https://api.github.com/repos/cqiqi271/xiaoqi-ai-canvas/git/trees/main?recursive=1"
@@ -4930,6 +4930,8 @@ AUTO_BILLING_SUPPORT_CACHE = {}
 AUTO_BILLING_STATUS_CACHE = {}
 AUTO_BILLING_LAST_STATE = {}
 AUTO_BILLING_CACHE_SECONDS = 300
+AUTO_PRICING_CACHE = {}
+AUTO_PRICING_CACHE_SECONDS = 600
 
 def provider_billing_root_candidates(provider):
     base = str((provider or {}).get("base_url") or "").strip().rstrip("/")
@@ -4942,6 +4944,226 @@ def provider_billing_root_candidates(provider):
         roots.append(base[:-3].rstrip("/"))
     roots.append(base)
     return list(dict.fromkeys(root for root in roots if root))
+
+
+def _pricing_currency(value, inherited=""):
+    if not isinstance(value, dict):
+        return inherited
+    for key in ("currency", "currency_code", "price_currency", "cost_currency", "unit_currency"):
+        raw = str(value.get(key) or "").strip().upper()
+        if raw in {"¥", "￥", "RMB", "CNH"}:
+            return "CNY"
+        if raw in {"$", "US$"}:
+            return "USD"
+        if raw in {"CNY", "USD", "EUR", "JPY", "GBP", "HKD", "TWD"}:
+            return raw
+    return inherited
+
+
+def _pricing_unit(value, inherited="request"):
+    if not isinstance(value, dict):
+        return inherited
+    raw = str(value.get("unit") or value.get("price_unit") or value.get("unit_type") or value.get("billing_unit") or value.get("per") or "").strip().lower()
+    if not raw:
+        return inherited
+    if "million" in raw or "1m" in raw or "1000000" in raw:
+        return "1m_tokens"
+    if "thousand" in raw or "1k" in raw or "1000" in raw:
+        return "1k_tokens"
+    if "token" in raw:
+        return "token"
+    if "image" in raw or "request" in raw or "call" in raw:
+        return "request"
+    return inherited
+
+
+def _number_from_price(value):
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    else:
+        match = re.search(r"[-+]?\d+(?:\.\d+)?", str(value).replace(",", ""))
+        if not match:
+            return None
+        try:
+            number = float(match.group(0))
+        except (TypeError, ValueError):
+            return None
+    return number if math.isfinite(number) and number >= 0 else None
+
+
+def _dynamic_price_from_mapping(value, kind="image", inherited_currency="", inherited_unit="request", depth=0):
+    """Extract explicit price metadata from a provider's pricing response."""
+    if depth > 7:
+        return None
+    if isinstance(value, list):
+        for item in value:
+            found = _dynamic_price_from_mapping(item, kind, inherited_currency, inherited_unit, depth + 1)
+            if found:
+                return found
+        return None
+    if not isinstance(value, dict):
+        number = _number_from_price(value)
+        return {"unit_price": number, "unit": inherited_unit, "currency": inherited_currency} if number is not None and inherited_currency else None
+    currency = _pricing_currency(value, inherited_currency)
+    unit = _pricing_unit(value, inherited_unit)
+    if kind == "image":
+        keys = ("image_price", "image_generation_price", "per_image", "per_request", "request_price", "unit_price", "price", "amount")
+    else:
+        keys = ("input_price", "prompt_price", "input", "input_cost", "output_price", "completion_price", "output", "output_cost", "unit_price", "price")
+    for key in keys:
+        if key not in value:
+            continue
+        nested = value.get(key)
+        if isinstance(nested, (dict, list)):
+            found = _dynamic_price_from_mapping(nested, kind, currency, unit, depth + 1)
+            if found:
+                if key in {"input", "input_price", "prompt_price", "input_cost"}:
+                    found["role"] = "input"
+                elif key in {"output", "output_price", "completion_price", "output_cost"}:
+                    found["role"] = "output"
+                return found
+        number = _number_from_price(nested)
+        if number is not None and currency:
+            role = "input" if key in {"input", "input_price", "prompt_price", "input_cost"} else "output" if key in {"output", "output_price", "completion_price", "output_cost"} else "request"
+            return {"unit_price": number, "unit": unit, "currency": currency, "role": role}
+    for key in ("pricing", "prices", "rate", "rates", "cost", "billing", "data", "result"):
+        if key in value:
+            found = _dynamic_price_from_mapping(value.get(key), kind, currency, unit, depth + 1)
+            if found:
+                return found
+    return None
+
+
+def _find_pricing_for_model(payload, model, kind="image", depth=0):
+    if depth > 8:
+        return None
+    model_name = str(model or "").strip().lower()
+    if isinstance(payload, list):
+        for item in payload:
+            found = _find_pricing_for_model(item, model, kind, depth + 1)
+            if found:
+                return found
+        return None
+    if not isinstance(payload, dict):
+        return None
+    candidate_name = str(payload.get("id") or payload.get("model") or payload.get("name") or "").strip().lower()
+    if candidate_name and candidate_name == model_name:
+        found = _dynamic_price_from_mapping(payload, kind)
+        if found:
+            return found
+    # Some gateways expose pricing as {"model-id": {"price": ..., "currency": ...}}.
+    for key, child in payload.items():
+        if str(key).strip().lower() == model_name and isinstance(child, (dict, list, int, float)):
+            found = _dynamic_price_from_mapping(child, kind)
+            if found:
+                return found
+    for key in ("data", "models", "items", "results", "pricing", "prices", "model", "result"):
+        if key in payload:
+            found = _find_pricing_for_model(payload.get(key), model, kind, depth + 1)
+            if found:
+                return found
+    return None
+
+
+async def provider_dynamic_pricing(provider, model, kind="image", force=False):
+    """Discover the selected provider's own public model price metadata."""
+    provider_id = str((provider or {}).get("id") or "").strip()
+    model = str(model or "").strip()
+    if not model or provider_id in {"modelscope", "runninghub", "volcengine", "jimeng", "codex", "gemini-cli"}:
+        return None
+    if provider_protocol(provider) != "openai":
+        return None
+    roots = provider_billing_root_candidates(provider)
+    if not roots or not provider_env_key_value(provider_id):
+        return None
+    cache_key = (provider_id or roots[0], model, str(kind or "image"))
+    now = time.monotonic()
+    cached = AUTO_PRICING_CACHE.get(cache_key)
+    if not force and cached and cached[0] > now:
+        return cached[1]
+    try:
+        headers = api_headers(provider=provider, model=model)
+        timeout = httpx.Timeout(connect=4.0, read=6.0, write=4.0, pool=4.0)
+        model_path = urllib.parse.quote(model, safe="")
+        paths = (f"/v1/models/{model_path}", f"/models/{model_path}", "/v1/pricing", "/pricing", "/api/pricing", "/v1/models", "/models", "/api/models")
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            requests_to_probe = [
+                asyncio.create_task(client.get(f"{root}{path}", headers=headers))
+                for root in roots
+                for path in paths
+            ]
+            try:
+                responses = await asyncio.wait_for(
+                    asyncio.gather(*requests_to_probe, return_exceptions=True),
+                    timeout=7.0,
+                )
+            except asyncio.TimeoutError:
+                for task in requests_to_probe:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*requests_to_probe, return_exceptions=True)
+                responses = []
+            for response in responses:
+                if isinstance(response, Exception) or response.status_code != 200:
+                    continue
+                try:
+                    found = _find_pricing_for_model(response.json(), model, kind)
+                except Exception:
+                    continue
+                if found and found.get("unit_price") is not None and found.get("currency"):
+                    found.update({"model": model, "kind": kind, "source": "dynamic_pricing", "fetched_at": time.time()})
+                    AUTO_PRICING_CACHE[cache_key] = (now + AUTO_PRICING_CACHE_SECONDS, found)
+                    return found
+    except Exception:
+        pass
+    AUTO_PRICING_CACHE[cache_key] = (now + 120, None)
+    return None
+
+
+def dynamic_generation_cost(pricing, raw_items, kind="image", count=1):
+    if not isinstance(pricing, dict):
+        return None
+    currency = str(pricing.get("currency") or "").upper()
+    unit = str(pricing.get("unit") or "request")
+    unit_price = _number_from_price(pricing.get("unit_price"))
+    if not currency or unit_price is None:
+        return None
+    raw_items = [item for item in (raw_items or []) if isinstance(item, dict)]
+    usage = next((item.get("usage") for item in raw_items if isinstance(item.get("usage"), dict)), None)
+    if kind == "chat" and unit in {"token", "1k_tokens", "1m_tokens"} and usage:
+        total_tokens = _number_from_price(usage.get("total_tokens"))
+        if total_tokens is None:
+            total_tokens = (_number_from_price(usage.get("prompt_tokens")) or 0) + (_number_from_price(usage.get("completion_tokens")) or 0)
+        divisor = 1 if unit == "token" else 1000 if unit == "1k_tokens" else 1000000
+        return {"amount": round(unit_price * total_tokens / divisor, 6), "currency": currency, "source": "dynamic_pricing", "method": "upstream_price", "count": 1}
+    amount_count = max(1, int(count or 1))
+    return {"amount": round(unit_price * amount_count, 6), "currency": currency, "source": "dynamic_pricing", "method": "upstream_price", "count": amount_count, "unit_price": unit_price}
+
+
+def dynamic_raw_items(operation_result):
+    """Normalize operation results for the dynamic pricing calculator."""
+    if isinstance(operation_result, list):
+        items = []
+        for item in operation_result:
+            if isinstance(item, (list, tuple)) and len(item) >= 3 and isinstance(item[2], dict):
+                items.append(item[2])
+            elif isinstance(item, dict):
+                items.append(item.get("raw") if isinstance(item.get("raw"), dict) else item)
+        return items
+    if isinstance(operation_result, dict):
+        raw = operation_result.get("raw")
+        return [raw if isinstance(raw, dict) else operation_result]
+    return []
+
+
+def cached_dynamic_pricing(provider, model, kind="image"):
+    key = (str((provider or {}).get("id") or "").strip(), str(model or "").strip(), str(kind or "image"))
+    cached = AUTO_PRICING_CACHE.get(key)
+    if cached and cached[0] > time.monotonic():
+        return cached[1]
+    return None
 
 def provider_auto_billing_group(provider):
     provider_id = str((provider or {}).get("id") or (provider or {}).get("base_url") or "default")
@@ -5123,6 +5345,8 @@ def generation_cost_status(provider, cost=None):
     if cost:
         if cost.get("method") == "billing_delta":
             return "已按上游账单差额自动计算"
+        if cost.get("source") == "dynamic_pricing" or cost.get("method") == "upstream_price":
+            return "已按当前接口公开费率自动计算"
         return "已读取上游实际扣费"
     provider_id = str((provider or {}).get("id") or (provider or {}).get("base_url") or "default")
     state = AUTO_BILLING_LAST_STATE.get(provider_id)
@@ -5194,11 +5418,15 @@ async def finalize_automatic_billing_group(provider, group):
         if future and not future.done():
             future.set_result(cost)
 
-async def run_with_automatic_billing(provider, operation, weight=1.0):
+async def run_with_automatic_billing(provider, operation, weight=1.0, model="", kind="image"):
     """Calculate real charges while keeping simultaneous generations concurrent."""
     group = provider_auto_billing_group(provider)
     loop = asyncio.get_running_loop()
     member = {"future": loop.create_future(), "reported": None, "weight": max(0.000001, float(weight or 1))}
+    if not model:
+        models = provider.get("image_models") if kind == "image" else provider.get("chat_models") if kind == "chat" else provider.get("video_models")
+        model = str((models or [""])[0] or "").strip()
+    dynamic_pricing = await provider_dynamic_pricing(provider, model, kind) if model else None
     async with group["lock"]:
         if int(group.get("active") or 0) == 0:
             group["before"] = await provider_billing_snapshot(provider)
@@ -5224,6 +5452,9 @@ async def run_with_automatic_billing(provider, operation, weight=1.0):
         if group["active"] == 0:
             await finalize_automatic_billing_group(provider, group)
     automatic_cost = await member["future"]
+    raw_items = dynamic_raw_items(result)
+    reported_cost = generation_cost_for_results(raw_items, provider, model, kind, weight) if raw_items else None
+    automatic_cost = automatic_cost or reported_cost or dynamic_generation_cost(dynamic_pricing, raw_items, kind, weight)
     if isinstance(result, dict) and not automatic_cost and not result.get("generation_cost"):
         result["generation_cost_status"] = generation_cost_status(provider)
     return result, automatic_cost
@@ -14368,6 +14599,20 @@ async def fetch_upstream_models(provider_id: str):
         raise HTTPException(status_code=400, detail=f"{provider.get('name') or provider_id} 未配置 API Key")
     return await fetch_models_from_upstream(provider.get("base_url") or "", api_key, provider_protocol(provider), provider.get("image_request_mode") or "openai")
 
+
+@app.get("/api/providers/{provider_id}/pricing")
+async def fetch_provider_dynamic_pricing(provider_id: str, model: str = "", kind: str = "image", force: bool = False):
+    """读取当前接口公开的模型费率，不读取或修改本地 API 配置。"""
+    provider = get_api_provider_exact(provider_id)
+    if not provider:
+        raise HTTPException(status_code=404, detail="API 平台不存在")
+    kind = kind if kind in {"image", "chat", "video"} else "image"
+    model = str(model or "").strip()
+    if not model:
+        model = ((provider.get("image_models") if kind == "image" else provider.get("chat_models") if kind == "chat" else provider.get("video_models")) or [""])[0]
+    pricing = await provider_dynamic_pricing(provider, model, kind, force=force)
+    return {"provider_id": provider_id, "model": model, "kind": kind, "pricing": pricing, "automatic": True, "message": "已读取当前接口公开费率" if pricing else "当前接口未公开可识别的模型费率"}
+
 async def build_online_image_result(payload: OnlineImageRequest):
     provider = get_api_provider(payload.provider_id)
     default_model = (provider.get("image_models") or [IMAGE_MODEL])[0]
@@ -14407,7 +14652,7 @@ async def build_online_image_result(payload: OnlineImageRequest):
         return await asyncio.gather(*(generate_one() for _ in range(count)))
 
     try:
-        generated, automatic_cost = await run_with_automatic_billing(provider, generate_batch, weight=count)
+        generated, automatic_cost = await run_with_automatic_billing(provider, generate_batch, weight=count, model=model, kind="image")
     except httpx.HTTPStatusError as exc:
         log_net_error(f"生图 HTTP状态错误 provider={provider.get('id')} model={model} size={request_size}", exc)
         text = exc.response.text or ''
@@ -15894,7 +16139,7 @@ async def canvas_video(payload: CanvasVideoRequest):
     async def operation():
         return await canvas_video_impl(payload, provider)
 
-    result, automatic_cost = await run_with_automatic_billing(provider, operation)
+    result, automatic_cost = await run_with_automatic_billing(provider, operation, model=payload.model, kind="video")
     if automatic_cost and isinstance(result, dict):
         result["generation_cost"] = automatic_cost
     return result
@@ -16390,7 +16635,7 @@ async def canvas_llm(payload: CanvasLLMRequest):
     async def operation():
         return await canvas_llm_impl(payload, _provider)
 
-    result, automatic_cost = await run_with_automatic_billing(_provider, operation)
+    result, automatic_cost = await run_with_automatic_billing(_provider, operation, model=payload.model, kind="chat")
     if automatic_cost and isinstance(result, dict):
         result["generation_cost"] = automatic_cost
     return result

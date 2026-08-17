@@ -2526,7 +2526,7 @@ function smartEstimatedGenerationCost(sourceSettings=settings, count=1, kind='im
     return null;
 }
 function smartCostEstimateContent(sourceSettings=settings, kind='image'){
-    return '<span>费用</span><strong>等待上游返回实际扣费</strong><em>不会套用其他接口的价格；如果接口不提供扣费或账单信息，将显示无法自动计算</em>';
+    return '<span>费用</span><strong>自动读取当前接口</strong><em>优先读取实际扣费，其次读取当前接口公开费率；接口未公开时不会猜价格</em>';
 }
 function smartCostEstimateHtml(sourceSettings=settings, kind='image'){
     return `<div class="smart-cost-estimate" data-smart-cost-estimate="1">${smartCostEstimateContent(sourceSettings, kind)}</div>`;
@@ -7086,12 +7086,12 @@ function normalizeSmartGenerationCost(value){
     if(!value || typeof value !== 'object') return null;
     const amount = Number(value.amount);
     if(!Number.isFinite(amount) || amount < 0) return null;
-    // Only upstream-reported money is authoritative. Hide legacy local/catalog estimates.
-    if(value.source !== 'reported') return null;
+    // Accept only upstream-reported money or the selected provider's own discovered rate.
+    if(!['reported','dynamic_pricing'].includes(value.source)) return null;
     return {
         amount,
         currency:String(value.currency || 'CNY').toUpperCase(),
-        source:'reported',
+        source:value.source,
         count:Math.max(1, Number(value.count || 1)),
         unit_price:Number.isFinite(Number(value.unit_price)) ? Number(value.unit_price) : undefined
     };
@@ -7105,7 +7105,7 @@ function mergeSmartGenerationCost(current, addition){
     return {
         amount:left.amount + right.amount,
         currency:left.currency,
-        source:left.source === 'reported' && right.source === 'reported' ? 'reported' : (left.source === 'catalog' || right.source === 'catalog' ? 'catalog' : 'estimated'),
+        source:left.source === 'reported' && right.source === 'reported' ? 'reported' : 'dynamic_pricing',
         count:Number(left.count || 1) + Number(right.count || 1)
     };
 }
@@ -7114,7 +7114,7 @@ function formatSmartGenerationCost(cost, options={}){
     if(!item) return '';
     const symbol = ['CNY','RMB','CNH'].includes(item.currency) ? '¥' : item.currency === 'USD' ? '$' : `${item.currency} `;
     const digits = item.amount >= 1 ? 2 : item.amount >= 0.01 ? 3 : 4;
-    const prefix = item.source === 'reported' ? '' : '';
+    const prefix = item.source === 'dynamic_pricing' ? '~' : '';
     return `${prefix}${symbol}${item.amount.toFixed(digits)}`;
 }
 function smartCostPeriodStart(period='today'){
@@ -7151,7 +7151,7 @@ function smartCanvasCostTotals(logs=smartCostLogs('all'), source='all'){
         if(!cost) return;
         const matchesSource = source === 'all'
             || cost.source === source
-            || (source === 'estimated' && cost.source === 'catalog');
+            || (source === 'dynamic_pricing' && cost.source === 'dynamic_pricing');
         if(!matchesSource) return;
         totals[cost.currency] = (totals[cost.currency] || 0) + cost.amount;
     });
