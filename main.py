@@ -162,7 +162,7 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 GLOBAL_LOOP = None
-APP_VERSION = "2026.08.07.3"
+APP_VERSION = "2026.08.07.5"
 GITHUB_REPO_URL = "https://github.com/cqiqi271/xiaoqi-ai-canvas"
 GITHUB_VERSION_URL = "https://raw.githubusercontent.com/cqiqi271/xiaoqi-ai-canvas/main/VERSION"
 GITHUB_TREE_URL = "https://api.github.com/repos/cqiqi271/xiaoqi-ai-canvas/git/trees/main?recursive=1"
@@ -219,6 +219,8 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WORKFLOW_DIR = os.path.join(BASE_DIR, "workflows")
 WORKFLOW_PATH = os.path.join(WORKFLOW_DIR, "Z-Image.json")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
+MODEL_PRICE_CATALOG_FILE = os.path.join(STATIC_DIR, "model-price-catalog.json")
+MODEL_PRICE_CATALOG_CACHE: Dict[str, Any] = {"mtime": None, "data": None}
 STATIC_RUNNINGHUB_DIR = os.path.join(STATIC_DIR, "runninghub")
 STATIC_RUNNINGHUB_THUMBNAIL_DIR = os.path.join(STATIC_RUNNINGHUB_DIR, "thumbnails")
 STATIC_RUNNINGHUB_API_PROVIDERS_FILE = os.path.join(STATIC_RUNNINGHUB_DIR, "api_providers.json")
@@ -4752,6 +4754,90 @@ def configured_generation_cost(provider, model, kind="image", count=1):
         "count": count,
     }
 
+def normalize_catalog_url(value):
+    text = str(value or "").strip().rstrip("/")
+    if not text.startswith(("http://", "https://")):
+        return ""
+    parsed = urllib.parse.urlparse(text)
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{parsed.path.rstrip('/')}"
+
+def load_model_price_catalog():
+    """读取项目统一费率目录，不读取、不写入用户 API 配置。"""
+    fallback = {"schema_version": 1, "currency": "CNY", "providers": []}
+    try:
+        mtime = os.path.getmtime(MODEL_PRICE_CATALOG_FILE)
+    except OSError:
+        return fallback
+    cached = MODEL_PRICE_CATALOG_CACHE
+    if cached.get("mtime") == mtime and isinstance(cached.get("data"), dict):
+        return cached["data"]
+    try:
+        with open(MODEL_PRICE_CATALOG_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception as exc:
+        print(f"加载统一模型费率目录失败: {exc}")
+        return fallback
+    if not isinstance(raw, dict):
+        return fallback
+    providers = []
+    for item in raw.get("providers") or []:
+        if not isinstance(item, dict):
+            continue
+        providers.append({
+            "id": str(item.get("id") or "").strip(),
+            "provider_ids": [
+                str(value or "").strip().lower()
+                for value in (item.get("provider_ids") or [])
+                if str(value or "").strip()
+            ],
+            "base_urls": [
+                normalize_catalog_url(value)
+                for value in (item.get("base_urls") or [])
+                if normalize_catalog_url(value)
+            ],
+            "prices": normalize_model_prices(item.get("prices")),
+        })
+    catalog = {
+        "schema_version": int(raw.get("schema_version") or 1),
+        "updated_at": str(raw.get("updated_at") or "").strip(),
+        "currency": str(raw.get("currency") or "CNY").strip().upper() or "CNY",
+        "providers": providers,
+    }
+    MODEL_PRICE_CATALOG_CACHE.update({"mtime": mtime, "data": catalog})
+    return catalog
+
+def central_catalog_generation_cost(provider, model, kind="image", count=1):
+    """按项目统一目录返回估算费用，优先级高于本机旧版备用费率。"""
+    provider_id = str((provider or {}).get("id") or "").strip().lower()
+    base_url = normalize_catalog_url((provider or {}).get("base_url"))
+    model_name = str(model or "").strip()
+    kind = str(kind or "image").strip().lower()
+    if not model_name or kind not in {"image", "chat", "video"}:
+        return None
+    catalog = load_model_price_catalog()
+    for entry in catalog.get("providers") or []:
+        ids = set(entry.get("provider_ids") or [])
+        bases = set(entry.get("base_urls") or [])
+        if provider_id not in ids and base_url not in bases:
+            continue
+        prices = (entry.get("prices") or {}).get(kind) or {}
+        price = prices.get(model_name)
+        if price is None:
+            lower_lookup = {str(key).lower(): value for key, value in prices.items()}
+            price = lower_lookup.get(model_name.lower())
+        if price is None:
+            continue
+        amount_count = max(1, int(count or 1))
+        return {
+            "amount": round(float(price) * amount_count, 6),
+            "currency": str(catalog.get("currency") or "CNY").upper(),
+            "source": "catalog",
+            "unit": "request",
+            "unit_price": float(price),
+            "count": amount_count,
+        }
+    return None
+
 def reported_generation_cost(raw):
     """只读取带明确币种的上游扣费字段，避免把 token 数误当金额。"""
     cost_keys = ("total_cost", "cost", "charged_amount", "charge_amount", "amount_charged")
@@ -4801,16 +4887,18 @@ def reported_generation_cost(raw):
     return visit(raw)
 
 def generation_cost_for_results(raw_items, provider, model, kind="image", count=1):
-    reported = [reported_generation_cost(raw) for raw in (raw_items or [])]
+    raw_items = [raw for raw in (raw_items or []) if raw is not None]
+    reported = [reported_generation_cost(raw) for raw in raw_items]
     reported = [item for item in reported if item]
-    if reported and len({item["currency"] for item in reported}) == 1:
+    # 只有本批每一项都有上游费用时才汇总实际金额，避免部分响应缺失费用而少算。
+    if raw_items and len(reported) == len(raw_items) and len({item["currency"] for item in reported}) == 1:
         return {
             "amount": round(sum(float(item["amount"]) for item in reported), 6),
             "currency": reported[0]["currency"],
             "source": "reported",
             "count": len(reported),
         }
-    return configured_generation_cost(provider, model, kind, count)
+    return central_catalog_generation_cost(provider, model, kind, count) or configured_generation_cost(provider, model, kind, count)
 
 def attach_generation_cost(result, provider, model, kind="image", count=1):
     """Attach cost metadata without changing the provider-specific response shape."""
@@ -13387,6 +13475,7 @@ async def ai_config():
         "video_models": VIDEO_MODELS,
         "comfy_instances": COMFYUI_INSTANCES,
         "api_providers": providers,
+        "model_price_catalog": load_model_price_catalog(),
         "has_api_key": bool(AI_API_KEY),
         "ms_chat_models": MODELSCOPE_CHAT_MODELS,
         "has_ms_key": bool(modelscope_api_key()),

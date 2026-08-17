@@ -3466,7 +3466,7 @@ function renderModels(kind){
                     ${label && label !== model ? `<div class="model-display-name">${escapeHtml(label)}</div>` : ''}
                     <input value="${escapeAttr(model)}" oninput="updateModel('${kind}', ${index}, this.value)">
                 </div>
-                <label class="model-price-field" title="系统会优先自动读取实际扣费；平台不提供计费数据时才使用这个备用价格"><span>备用¥/次</span><input type="number" min="0" step="0.0001" value="${price ?? ''}" placeholder="可不填" oninput="updateModelPrice('${kind}', ${index}, this.value)"></label>
+                <span class="model-price-field auto-price-badge" title="费用会自动读取上游实际扣费或项目统一费率；无需逐个 API 填写"><span>自动费率</span><i data-lucide="wand-sparkles" class="w-3 h-3"></i></span>
                 ${modelProtocolSelectHtml(kind, index, model, item)}
                 <button class="icon-btn" type="button" onclick="removeModel('${kind}', ${index})" title="删除"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
             </div>

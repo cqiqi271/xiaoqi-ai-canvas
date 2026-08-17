@@ -404,6 +404,7 @@ let chatModels = ['gpt-4o-mini'];
 let videoModels = [];
 let msChatModels = [];
 let apiProviders = [];
+let centralModelPriceCatalog = null;
 let comfyBackendCount = 1;
 let comfyWorkflows = [];
 let comfyWorkflowCache = {};
@@ -732,19 +733,37 @@ function providerImageModels(providerId){
     const provider = apiProviders.find(p => p.id === providerId);
     return uniqueModels(provider?.image_models || []);
 }
-function providerModelUnitPrice(providerId, model, kind='image'){
+function catalogProviderMatches(providerId, provider, entry){
+    const ids = (entry?.provider_ids || []).map(value => String(value || '').trim().toLowerCase());
+    if(ids.includes(String(providerId || '').trim().toLowerCase())) return true;
+    const raw = String(provider?.base_url || '').trim().replace(/\/+$/, '').toLowerCase();
+    return raw && (entry?.base_urls || []).some(value => raw === String(value || '').trim().replace(/\/+$/, '').toLowerCase());
+}
+function providerModelPriceInfo(providerId, model, kind='image'){
     const provider = apiProviders.find(p => p.id === providerId);
+    const modelName = String(model || '').trim();
+    for(const entry of (centralModelPriceCatalog?.providers || [])){
+        if(!catalogProviderMatches(providerId, provider, entry)) continue;
+        const prices = entry?.prices?.[kind] || {};
+        const key = Object.keys(prices).find(name => String(name).toLowerCase() === modelName.toLowerCase());
+        const value = key === undefined ? NaN : Number(prices[key]);
+        if(Number.isFinite(value) && value >= 0) return {price:value, source:'catalog'};
+    }
     const prices = provider?.model_prices?.[kind];
-    const value = prices && Object.prototype.hasOwnProperty.call(prices, String(model || '').trim())
-        ? Number(prices[String(model || '').trim()])
+    const value = prices && Object.prototype.hasOwnProperty.call(prices, modelName)
+        ? Number(prices[modelName])
         : NaN;
-    return Number.isFinite(value) && value >= 0 ? value : null;
+    return Number.isFinite(value) && value >= 0 ? {price:value, source:'estimated'} : null;
+}
+function providerModelUnitPrice(providerId, model, kind='image'){
+    return providerModelPriceInfo(providerId, model, kind)?.price ?? null;
 }
 function estimatedGenerationCost(providerId, model, count=1, kind='image'){
-    const unitPrice = providerModelUnitPrice(providerId, model, kind);
-    if(unitPrice === null) return null;
+    const priceInfo = providerModelPriceInfo(providerId, model, kind);
+    if(!priceInfo) return null;
+    const unitPrice = priceInfo.price;
     const amountCount = Math.max(1, Number(count) || 1);
-    return {amount:unitPrice * amountCount, currency:'CNY', source:'estimated', count:amountCount, unit_price:unitPrice};
+    return {amount:unitPrice * amountCount, currency:String(centralModelPriceCatalog?.currency || 'CNY').toUpperCase(), source:priceInfo.source, count:amountCount, unit_price:unitPrice};
 }
 function generationCostForRun(run, count=1, kind='image'){
     const node = run?.node || {};
@@ -774,7 +793,7 @@ function ensureRunRequestMeta(run, resultMeta={}, count=1, kind='image'){
 }
 function generationCostEstimateContent(providerId, model, count=1, kind='image'){
     const estimate = estimatedGenerationCost(providerId, model, count, kind);
-    if(!estimate) return '<span>费用估算</span><strong>未设置费率</strong><em>请到 API 设置填写“备用¥/次”</em>';
+    if(!estimate) return '<span>费用估算</span><strong>暂未收录费率</strong><em>系统会自动读取上游实际扣费或项目统一费率</em>';
     const unit = formatGenerationCost({...estimate, amount:estimate.unit_price, count:1}, {compact:true});
     const total = formatGenerationCost(estimate, {compact:true});
     const label = kind === 'video' ? '本次' : `本次 ${estimate.count} 张`;
@@ -1581,6 +1600,7 @@ async function loadConfig(){
         msChatModels = cfg.ms_chat_models?.length ? cfg.ms_chat_models : msChatModels;
         comfyBackendCount = Math.max(1, (cfg.comfy_instances || []).length || 1);
         apiProviders = Array.isArray(cfg.api_providers) && cfg.api_providers.length ? cfg.api_providers : defaultApiProviders();
+        centralModelPriceCatalog = cfg.model_price_catalog && typeof cfg.model_price_catalog === 'object' ? cfg.model_price_catalog : null;
         models.nano = imageModels.find(m => m.toLowerCase().includes('nano')) || 'nano-banana-pro';
         models.gpt = imageModels.find(m => !m.toLowerCase().includes('nano')) || cfg.image_model || 'gpt-image-2';
         try {
@@ -13448,7 +13468,7 @@ function normalizeGenerationCost(value){
     return {
         amount,
         currency:String(value.currency || 'CNY').toUpperCase(),
-        source:value.source === 'reported' ? 'reported' : 'estimated',
+        source:value.source === 'reported' ? 'reported' : value.source === 'catalog' ? 'catalog' : 'estimated',
         count:Math.max(1, Number(value.count || 1)),
         unit_price:Number.isFinite(Number(value.unit_price)) ? Number(value.unit_price) : undefined
     };
@@ -13462,7 +13482,7 @@ function mergeGenerationCost(current, addition){
     return {
         amount:left.amount + right.amount,
         currency:left.currency,
-        source:left.source === 'reported' && right.source === 'reported' ? 'reported' : 'estimated',
+        source:left.source === 'reported' && right.source === 'reported' ? 'reported' : (left.source === 'catalog' || right.source === 'catalog' ? 'catalog' : 'estimated'),
         count:Number(left.count || 1) + Number(right.count || 1)
     };
 }
@@ -13477,7 +13497,7 @@ function formatGenerationCost(cost, options={}){
     if(!item) return '';
     const symbol = ['CNY','RMB','CNH'].includes(item.currency) ? '¥' : item.currency === 'USD' ? '$' : `${item.currency} `;
     const digits = item.amount >= 1 ? 2 : item.amount >= 0.01 ? 3 : 4;
-    const prefix = item.source === 'reported' ? '' : (options.compact ? '约' : '估算 ');
+    const prefix = item.source === 'reported' ? '' : (options.compact ? '约' : item.source === 'catalog' ? '统一估算 ' : '本机估算 ');
     return `${prefix}${symbol}${item.amount.toFixed(digits)}`;
 }
 function canvasCostPeriodStart(period='today'){
@@ -13646,7 +13666,7 @@ function renderCanvasLog(){
                     <span class="log-chip">${escapeHtml(log.platform || '-')}</span>
                     ${taskLabel ? `<span class="log-chip">${escapeHtml(taskLabel)}</span>` : ''}
                     <span class="log-chip">${escapeHtml(formatRunDuration(log.runMs || 0))}</span>
-                    ${log.generationCost ? `<span class="log-chip cost-chip" title="${log.generationCost.source === 'reported' ? '上游返回的实际费用' : '按 API 设置中的模型单价估算'}">${escapeHtml(formatGenerationCost(log.generationCost))}</span>` : ''}
+                    ${log.generationCost ? `<span class="log-chip cost-chip" title="${log.generationCost.source === 'reported' ? '上游返回的实际费用' : log.generationCost.source === 'catalog' ? '按项目统一费率自动估算' : '按本机备用费率估算'}">${escapeHtml(formatGenerationCost(log.generationCost))}</span>` : ''}
                 </div>
                 <div class="log-subline">${subParts.map(part => `<span title="${escapeAttr(part)}">${escapeHtml(part)}</span>`).join('')}</div>
                 ${log.error ? `<div class="log-error" title="${escapeAttr(log.error)}" data-error="${escapeAttr(log.error)}">${escapeHtml(log.error)}</div>` : ''}
@@ -14016,7 +14036,7 @@ function renderOutputMedia(item, useGridLayout=false){
     const gridStyle = grid ? ` style="grid-row:${Number(grid.row || 0) + 1};grid-column:${Number(grid.col || 0) + 1};aspect-ratio:${Math.max(1, Number(grid.w || 1))}/${Math.max(1, Number(grid.h || 1))}"` : '';
     const timePill = meta.runMs && !meta.viewed ? `<span class="output-time-pill">${formatRunDuration(meta.runMs)}</span>` : '';
     const cost = normalizeGenerationCost(meta.run?.request?.generation_cost);
-    const costPill = cost ? `<span class="output-cost-pill ${cost.source === 'reported' ? 'reported' : 'estimated'}" title="${cost.source === 'reported' ? '上游返回的实际费用' : '按模型单价估算'}">${escapeHtml(formatGenerationCost(cost, {compact:true}))}</span>` : '';
+    const costPill = cost ? `<span class="output-cost-pill ${cost.source === 'reported' ? 'reported' : cost.source === 'catalog' ? 'catalog' : 'estimated'}" title="${cost.source === 'reported' ? '上游返回的实际费用' : cost.source === 'catalog' ? '按项目统一费率自动估算' : '按本机备用费率估算'}">${escapeHtml(formatGenerationCost(cost, {compact:true}))}</span>` : '';
     if(isMissingAssetUrl(url)){
         return `<div class="output-img-wrap" data-output-url="${safe}" data-missing-url="${safe}"${gridStyle}>${missingAssetHtml(url, true)}${timePill}${costPill}<button class="output-del" title="${tr('common.delete')}">×</button></div>`;
     }
