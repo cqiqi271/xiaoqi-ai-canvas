@@ -315,7 +315,8 @@ let settings = {
     provider_id:'',
     model:'',
     ratio:'square',
-    resolution:'4k',
+    resolution:'1k',
+    _apiResolutionUserSet:false,
     customRatio:'',
     customRatioWidth:'',
     customRatioHeight:'',
@@ -727,7 +728,9 @@ function isGptImageAutoSizeModel(model){
         || compact.endsWith('gptimage2');
 }
 function defaultSmartApiResolution(model){
-    return isGptImageAutoSizeModel(model) ? '4k' : '1k';
+    // Default to the broadly available base/1K channel. Users can still
+    // explicitly select 2K or 4K when their upstream account supports it.
+    return '1k';
 }
 function mediaItemForStorage(item){
     if(!item || typeof item !== 'object') return item;
@@ -2848,8 +2851,20 @@ function apiImageSize(ratioValue, resolutionValue, customRatioValue='', customSi
 function normalizeApiSizeSettings(prefix=''){
     const ratioKey = prefix ? `${prefix}Ratio` : 'ratio';
     const resKey = prefix ? `${prefix}Resolution` : 'resolution';
+    if(
+        !prefix &&
+        settings._apiResolutionUserSet !== true &&
+        (!settings[resKey] || settings[resKey] === '1k' || settings[resKey] === '4k' || settings[resKey] === 'auto') &&
+        /^gpt-image-2-(?:2k|4k)$/i.test(String(settings.model || '').trim())
+    ){
+        const baseModel = providerImageModels(settings.provider_id)
+            .find(model => String(model || '').trim().toLowerCase() === 'gpt-image-2');
+        if(baseModel) settings.model = baseModel;
+    }
     const allowAuto = !prefix && settings.engine === 'api' && settings.apiKind !== 'video' && isGptImageAutoSizeModel(settings.model);
-    if(!settings[resKey]) settings[resKey] = allowAuto ? defaultSmartApiResolution(settings.model) : '1k';
+    if(!prefix && allowAuto && settings._apiResolutionUserSet !== true && (!settings[resKey] || settings[resKey] === '4k' || settings[resKey] === 'auto')){
+        settings[resKey] = defaultSmartApiResolution(settings.model);
+    } else if(!settings[resKey]) settings[resKey] = allowAuto ? defaultSmartApiResolution(settings.model) : '1k';
     if(!allowAuto && settings[resKey] === 'auto') settings[resKey] = '1k';
     if(settings[resKey] === 'auto' && !settings[ratioKey]) settings[ratioKey] = 'square';
 }
@@ -4163,7 +4178,16 @@ function setDynamicSetting(key, value){
     const numericKeys = new Set(['count','width','height','videoDuration','enhanceStrength','enhanceUpscaleRes','editUpscaleRes','customRatioWidth','customRatioHeight','customWidth','customHeight','msCustomRatioWidth','msCustomRatioHeight','msCustomWidth','msCustomHeight']);
     const layoutKeys = new Set(['provider_id','model','resolution','ratio','msgenModel','msCustomModel','msResolution','msRatio','videoProvider','videoModel','videoAspect','videoResolution','comfyMode','comfyWorkflow','quality','count','enhanceUpscaleRes','editUpscaleRes','jimengUpscaleRes','rhConfigKey','rhPayment','rhInstanceType']);
     settings[key] = numericKeys.has(key) && value !== '' ? Number(value) : value;
-    if(key === 'provider_id') settings.model = '';
+    if(key === 'provider_id'){
+        settings.model = '';
+        settings._apiResolutionUserSet = false;
+        settings.resolution = '1k';
+    }
+    if(key === 'model'){
+        settings._apiResolutionUserSet = false;
+        if(settings.resolution !== 'custom') settings.resolution = defaultSmartApiResolution(settings.model);
+    }
+    if(key === 'resolution') settings._apiResolutionUserSet = true;
     if(key === 'videoProvider') settings.videoModel = '';
     if(key === 'videoMultimodal') settings._videoMultimodalUserSet = true;
     if(key === 'videoMultimodal' && settings.videoMultimodal) settings.videoUseFrameRoles = false;
@@ -4190,6 +4214,7 @@ function setDynamicSetting(key, value){
     if(key === 'customWidth' || key === 'customHeight'){
         settings.customSize = settings.customWidth && settings.customHeight ? `${settings.customWidth}x${settings.customHeight}` : '';
         settings.resolution = 'custom';
+        settings._apiResolutionUserSet = true;
     }
     if(key === 'msCustomWidth' || key === 'msCustomHeight'){
         settings.msCustomSize = settings.msCustomWidth && settings.msCustomHeight ? `${settings.msCustomWidth}x${settings.msCustomHeight}` : '';

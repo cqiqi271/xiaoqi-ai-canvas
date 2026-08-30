@@ -870,7 +870,9 @@ function isGptImageAutoSizeModel(model){
         || compact.endsWith('gptimage2');
 }
 function defaultApiImageResolution(model){
-    return isGptImageAutoSizeModel(resolveImageModel(model)) ? '4k' : '1k';
+    // Most OpenAI-compatible relays grant the base/1K channel first. Starting
+    // GPT Image 2 at 4K can route an otherwise valid key into a disabled tier.
+    return '1k';
 }
 function normalizedImageQuality(value){
     const quality = String(value || 'auto').trim().toLowerCase();
@@ -1082,8 +1084,17 @@ function exceedsFourKStandard(width, height){
 }
 function normalizeApiNodeSizeChoice(node){
     if(!node) return;
+    if(
+        node._apiResolutionUserSet !== true &&
+        (!node.resolution || node.resolution === '1k' || node.resolution === '4k' || node.resolution === 'auto') &&
+        /^gpt-image-2-(?:2k|4k)$/i.test(String(node.model || '').trim())
+    ){
+        const baseModel = providerImageModels(node.apiProvider)
+            .find(model => String(model || '').trim().toLowerCase() === 'gpt-image-2');
+        if(baseModel) node.model = baseModel;
+    }
     const allowAuto = isGptImageAutoSizeModel(resolveImageModel(node.model));
-    if(allowAuto && node._apiResolutionUserSet !== true && (!node.resolution || node.resolution === '1k' || node.resolution === 'auto')) node.resolution = defaultApiImageResolution(node.model);
+    if(allowAuto && node._apiResolutionUserSet !== true && (!node.resolution || node.resolution === '1k' || node.resolution === '4k' || node.resolution === 'auto')) node.resolution = defaultApiImageResolution(node.model);
     else if(!node.resolution) node.resolution = defaultApiImageResolution(node.model);
     if(!allowAuto && node.resolution === 'auto') node.resolution = '1k';
 }

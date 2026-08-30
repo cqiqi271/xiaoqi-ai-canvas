@@ -163,7 +163,7 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 GLOBAL_LOOP = None
-APP_VERSION = "2026.08.07.12"
+APP_VERSION = "2026.08.07.13"
 GITHUB_REPO_URL = "https://github.com/cqiqi271/xiaoqi-ai-canvas"
 GITHUB_VERSION_URL = "https://raw.githubusercontent.com/cqiqi271/xiaoqi-ai-canvas/main/VERSION"
 GITHUB_TREE_URL = "https://api.github.com/repos/cqiqi271/xiaoqi-ai-canvas/git/trees/main?recursive=1"
@@ -10672,6 +10672,18 @@ def is_gpt_image_2_model(model):
         or compact.endswith("gptimage2")
     )
 
+def compatible_gpt_image_model_for_resolution(provider, model, resolution=""):
+    """Normalize stale tiered GPT Image 2 selections before the only request."""
+    selected = str(model or "").strip()
+    requested_resolution = str(resolution or "").strip().lower()
+    normalized = re.sub(r"[^a-z0-9]+", "-", selected.lower()).strip("-")
+    if requested_resolution != "1k" or not re.fullmatch(r"gpt-image-2-(?:2k|4k)", normalized):
+        return model
+    for available in provider.get("image_models") or []:
+        if str(available or "").strip().lower() == "gpt-image-2":
+            return available
+    return model
+
 def normalize_gpt_image_2_size(size):
     width, height = parse_size_pair(size)
     if not width or not height:
@@ -10829,8 +10841,22 @@ def friendly_image_error_detail(text, size="", model=""):
         return "请求过于频繁，已被上游限流，请稍后再试。"
     if "unauthorized" in lower_text or "401" in lower_text:
         return "API Key 无效或已过期，请到「API 设置」检查 Key。"
-    if "model_not_found" in lower_text or "channel not found" in lower_text:
-        return f"上游平台找不到模型「{model}」可用通道。可能该模型未在此账号开通，请换一个已开通的模型。"
+    if "model_not_found" in lower_text or "channel not found" in lower_text or "no available channel" in lower_text:
+        group_match = re.search(r"under group\s+([a-z0-9_.-]+)", lower_text)
+        group_name = group_match.group(1) if group_match else ""
+        model_resolution = next((value.upper() for value in ("4k", "2k", "1k") if str(model or "").lower().endswith(f"-{value}")), "")
+        group_resolution_match = re.search(r"(?:^|[_-])(4k|2k|1k)(?:$|[_-])", group_name)
+        group_resolution = group_resolution_match.group(1).upper() if group_resolution_match else ""
+        if model_resolution and group_resolution and model_resolution != group_resolution:
+            return (
+                f"当前 API 账号只有 {group_resolution} 生图通道，但选择的是「{model}」({model_resolution})，两者不匹配。"
+                f"请把模型切换为「gpt-image-2」，并把分辨率选择为 {group_resolution} 后再生成。"
+                "本次失败已停止处理，不会自动重新提交，避免重复扣费。"
+            )
+        return (
+            f"上游平台找不到模型「{model}」的可用通道，可能是当前 API Key 没有开通该清晰度。"
+            "请先切换为接口模型列表中的基础型号和 1K 分辨率；本次失败不会自动重试。"
+        )
     return ""
 
 def parse_error_payload_text(text):
@@ -12208,6 +12234,7 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
         return await generate_tudou_async_image(prompt, size, quality, model, reference_images, provider, aspect_ratio, resolution)
     if is_tudou_provider(provider) and is_tudou_grok_image_model(model):
         return await generate_tudou_grok_image(prompt, size, model, reference_images, provider, aspect_ratio)
+    model = compatible_gpt_image_model_for_resolution(provider, model, resolution)
     is_gpt2 = is_gpt_image_2_model(model)
     is_apimart = is_apimart_provider(provider)
     # 不对 GPT 尺寸做任何缩小/拦截：用户选什么尺寸就原样发给上游；
@@ -12376,9 +12403,10 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             # 2) edits 失败 → 非 GPT-Image-2 可回退到 /images/generations + JSON image:[urls/base64]（grsai 风格）
             if response is None:
                 if is_gpt2:
+                    friendly = friendly_image_error_detail(edit_failed_text, size, model)
                     raise HTTPException(
                         status_code=502,
-                        detail=f"GPT-Image-2 编辑接口 /images/edits 调用失败：{edit_failed_text[:300] or edit_failed_status}。已停止自动重试，避免上游可能已扣费后再次请求。"
+                        detail=friendly or f"GPT-Image-2 编辑接口 /images/edits 调用失败：{edit_failed_text[:300] or edit_failed_status}。已停止自动重试，避免上游可能已扣费后再次请求。"
                     )
                 print(f"/images/edits failed ({edit_failed_status}): {edit_failed_text[:200]} → 回退到 /images/generations + image:[] JSON")
                 image_payload = [reference_to_data_url(ref, max_size=1536) for ref in image_refs[:ONLINE_IMAGE_REFERENCE_MAX]]
