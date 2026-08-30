@@ -26,13 +26,14 @@ import math
 import shlex
 import functools
 import html
+import copy
 import xml.etree.ElementTree as ET
 from typing import List, Dict, Any, Optional, Tuple
-from threading import Lock, Thread
+from threading import Lock, RLock, Thread
 import httpx
 from PIL import Image, ImageOps
 from io import BytesIO
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File, Form, Header, Request
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File, Form, Header, Request, Body
 from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response, StreamingResponse, JSONResponse
@@ -162,7 +163,7 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 GLOBAL_LOOP = None
-APP_VERSION = "2026.08.07.9"
+APP_VERSION = "2026.08.07.12"
 GITHUB_REPO_URL = "https://github.com/cqiqi271/xiaoqi-ai-canvas"
 GITHUB_VERSION_URL = "https://raw.githubusercontent.com/cqiqi271/xiaoqi-ai-canvas/main/VERSION"
 GITHUB_TREE_URL = "https://api.github.com/repos/cqiqi271/xiaoqi-ai-canvas/git/trees/main?recursive=1"
@@ -244,6 +245,9 @@ RUNNINGHUB_WORKFLOW_STORE_FILE = os.path.join(DATA_DIR, "runninghub_workflows.js
 SHARED_FOLDERS_FILE = os.path.join(DATA_DIR, "shared_folders.json")
 GLOBAL_CONFIG_FILE = os.path.join(BASE_DIR, "global_config.json")
 PROJECT_CONFIG_FILE = os.path.join(BASE_DIR, "project-config.json")
+RUNTIME_DIR = os.path.join(BASE_DIR, "runtime")
+TASK_CENTER_FILE = os.path.join(RUNTIME_DIR, "task-center.json")
+CANVAS_SNAPSHOT_DIR = os.path.join(RUNTIME_DIR, "canvas-snapshots")
 CANVAS_TRASH_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 LOCAL_IMAGE_IMPORT_MAX_BYTES = int(os.getenv("LOCAL_IMAGE_IMPORT_MAX_BYTES", str(50 * 1024 * 1024)))
 LOCAL_IMAGE_IMPORT_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
@@ -1509,6 +1513,8 @@ os.makedirs(STATIC_DIR, exist_ok=True)
 os.makedirs(WORKFLOW_DIR, exist_ok=True)
 os.makedirs(CONVERSATION_DIR, exist_ok=True)
 os.makedirs(CANVAS_DIR, exist_ok=True)
+os.makedirs(RUNTIME_DIR, exist_ok=True)
+os.makedirs(CANVAS_SNAPSHOT_DIR, exist_ok=True)
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
@@ -2800,6 +2806,9 @@ class GenerateRequest(BaseModel):
     type: str = "zimage"
     client_id: str = ""
     convert_to_jpg: bool = False
+    canvas_id: str = ""
+    node_id: str = ""
+    task_label: str = ""
 
 class DeleteHistoryRequest(BaseModel):
     timestamp: float
@@ -2844,6 +2853,9 @@ class OnlineImageRequest(BaseModel):
     reference_images: List[AIReference] = []
     operation: str = ""
     resolution_type: str = ""
+    canvas_id: str = ""
+    node_id: str = ""
+    task_label: str = ""
 
 class MidjourneySubmitRequest(BaseModel):
     provider_id: str = ""
@@ -2877,7 +2889,121 @@ class ImageTaskQueryRequest(BaseModel):
     task_id: str = Field(min_length=1, max_length=240)
 
 CANVAS_TASKS: Dict[str, Dict[str, Any]] = {}
-CANVAS_TASK_LOCK = Lock()
+CANVAS_TASK_LOCK = RLock()
+CANVAS_TASK_ACTIVE = 0
+
+
+def task_center_defaults() -> Dict[str, Any]:
+    return {
+        "max_concurrent": 2,
+        "max_batch_size": 20,
+        "retry_limit": 1,
+        "daily_cost_alert": 0.0,
+        "tasks": [],
+    }
+
+
+def read_task_center_store() -> Dict[str, Any]:
+    data = task_center_defaults()
+    try:
+        with open(TASK_CENTER_FILE, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict):
+            data.update({key: loaded.get(key, data[key]) for key in data})
+    except Exception:
+        pass
+    data["max_concurrent"] = max(1, min(8, int(data.get("max_concurrent") or 2)))
+    data["max_batch_size"] = max(1, min(100, int(data.get("max_batch_size") or 20)))
+    data["retry_limit"] = max(0, min(3, int(data.get("retry_limit") or 1)))
+    data["daily_cost_alert"] = max(0.0, float(data.get("daily_cost_alert") or 0))
+    data["tasks"] = [item for item in (data.get("tasks") or []) if isinstance(item, dict)][-600:]
+    return data
+
+
+def write_task_center_store(data: Dict[str, Any]) -> None:
+    payload = task_center_defaults()
+    payload.update({key: data.get(key, payload[key]) for key in payload})
+    payload["tasks"] = [item for item in (payload.get("tasks") or []) if isinstance(item, dict)][-600:]
+    temp_path = TASK_CENTER_FILE + ".tmp"
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    os.replace(temp_path, TASK_CENTER_FILE)
+
+
+def task_public_record(task: Dict[str, Any]) -> Dict[str, Any]:
+    result = dict(task or {})
+    result.pop("request", None)
+    result.pop("result", None)
+    return result
+
+
+def task_center_sync(task: Dict[str, Any]) -> None:
+    """Persist task status in a separate append-only store, never in history.json."""
+    with CANVAS_TASK_LOCK:
+        store = read_task_center_store()
+        rows = store.get("tasks") or []
+        public = task_public_record(task)
+        index = next((i for i, item in enumerate(rows) if item.get("id") == public.get("id")), -1)
+        if index >= 0:
+            rows[index] = {**rows[index], **public}
+        else:
+            rows.append(public)
+        store["tasks"] = rows[-600:]
+        write_task_center_store(store)
+
+
+def canvas_task_record(task_id: str, task_type: str, payload: Any) -> Dict[str, Any]:
+    raw = payload.dict() if hasattr(payload, "dict") else dict(payload or {})
+    now = time.time()
+    return {
+        "id": task_id,
+        "type": task_type,
+        "status": "queued",
+        "created_at": now,
+        "updated_at": now,
+        "canvas_id": str(raw.get("canvas_id") or ""),
+        "node_id": str(raw.get("node_id") or ""),
+        "label": str(raw.get("task_label") or raw.get("model") or task_type),
+        "model": str(raw.get("model") or raw.get("workflow_json") or ""),
+        "provider_id": str(raw.get("provider_id") or ""),
+        "prompt": str(raw.get("prompt") or "")[:600],
+        "request": raw,
+        "retry_count": 0,
+        "error": "",
+        "upstream_task_id": "",
+        "result": None,
+    }
+
+
+async def wait_for_canvas_task_slot(task_id: str) -> bool:
+    """Small local scheduler: queued work waits instead of overwhelming older PCs."""
+    global CANVAS_TASK_ACTIVE
+    while True:
+        with CANVAS_TASK_LOCK:
+            task = CANVAS_TASKS.get(task_id)
+            if not task or task.get("status") == "cancelled":
+                return False
+            limit = int(read_task_center_store().get("max_concurrent") or 2)
+            if CANVAS_TASK_ACTIVE < limit:
+                CANVAS_TASK_ACTIVE += 1
+                task["status"] = "running"
+                task["updated_at"] = time.time()
+                task_center_sync(task)
+                return True
+        await asyncio.sleep(0.18)
+
+
+def release_canvas_task_slot() -> None:
+    global CANVAS_TASK_ACTIVE
+    with CANVAS_TASK_LOCK:
+        CANVAS_TASK_ACTIVE = max(0, CANVAS_TASK_ACTIVE - 1)
+
+
+class TaskCenterSettingsRequest(BaseModel):
+    max_concurrent: int = 2
+    max_batch_size: int = 20
+    retry_limit: int = 1
+    daily_cost_alert: float = 0.0
 
 class CanvasVideoRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=VIDEO_PROMPT_MAX_LENGTH)
@@ -3581,6 +3707,105 @@ def save_canvas(canvas):
     with CANVAS_LOCK:
         with open(canvas_path(canvas["id"]), 'w', encoding='utf-8') as f:
             json.dump(canvas, f, ensure_ascii=False, indent=2)
+
+
+def canvas_snapshot_path(canvas_id: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9_-]", "", canvas_id or "")
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="无效的画布 ID")
+    return os.path.join(CANVAS_SNAPSHOT_DIR, f"{cleaned}.jsonl")
+
+
+def canvas_snapshot_payload(canvas: Dict[str, Any], reason: str = "manual") -> Dict[str, Any]:
+    # Snapshots contain only canvas structure. API credentials and media files stay untouched.
+    return {
+        "id": uuid.uuid4().hex,
+        "created_at": now_ms(),
+        "reason": str(reason or "manual")[:80],
+        "canvas": {
+            "id": canvas.get("id"),
+            "title": canvas.get("title"),
+            "kind": canvas.get("kind"),
+            "nodes": copy.deepcopy(canvas.get("nodes") or []),
+            "connections": copy.deepcopy(canvas.get("connections") or []),
+            "viewport": copy.deepcopy(canvas.get("viewport") or {}),
+            "settings": copy.deepcopy(canvas.get("settings") or {}),
+        },
+    }
+
+
+def create_canvas_snapshot(canvas: Dict[str, Any], reason: str = "manual") -> Dict[str, Any]:
+    record = canvas_snapshot_payload(canvas, reason)
+    path = canvas_snapshot_path(str(canvas.get("id") or ""))
+    rows = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            rows = [json.loads(line) for line in f if line.strip()]
+    except Exception:
+        rows = []
+    rows.append(record)
+    rows = rows[-20:]
+    temp_path = path + ".tmp"
+    with open(temp_path, "w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+    os.replace(temp_path, path)
+    return {key: record[key] for key in ("id", "created_at", "reason")}
+
+
+def list_canvas_snapshots(canvas_id: str) -> List[Dict[str, Any]]:
+    path = canvas_snapshot_path(canvas_id)
+    rows = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            rows = [json.loads(line) for line in f if line.strip()]
+    except Exception:
+        pass
+    return [{key: row.get(key) for key in ("id", "created_at", "reason")} for row in reversed(rows) if isinstance(row, dict)]
+
+
+def get_canvas_snapshot(canvas_id: str, snapshot_id: str) -> Optional[Dict[str, Any]]:
+    path = canvas_snapshot_path(canvas_id)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            rows = [json.loads(line) for line in f if line.strip()]
+    except Exception:
+        rows = []
+    return next((row for row in reversed(rows) if row.get("id") == snapshot_id), None)
+
+
+def canvas_integrity_report(canvas: Dict[str, Any]) -> Dict[str, Any]:
+    nodes = [node for node in (canvas.get("nodes") or []) if isinstance(node, dict) and node.get("id")]
+    node_ids = {str(node.get("id")) for node in nodes}
+    broken_connections = []
+    for connection in canvas.get("connections") or []:
+        if not isinstance(connection, dict):
+            continue
+        source = str(connection.get("from") or connection.get("source") or connection.get("fromId") or "")
+        target = str(connection.get("to") or connection.get("target") or connection.get("toId") or "")
+        if source and target and (source not in node_ids or target not in node_ids):
+            broken_connections.append(connection)
+    invalid_nodes = []
+    for node in nodes:
+        try:
+            x = float(node.get("x", 0))
+            y = float(node.get("y", 0))
+            if not math.isfinite(x) or not math.isfinite(y) or abs(x) > 100000 or abs(y) > 100000:
+                invalid_nodes.append(str(node.get("id")))
+        except Exception:
+            invalid_nodes.append(str(node.get("id")))
+    viewport = canvas.get("viewport") if isinstance(canvas.get("viewport"), dict) else {}
+    scale = viewport.get("scale", 1)
+    invalid_viewport = not isinstance(scale, (int, float)) or not math.isfinite(float(scale)) or float(scale) < 0.04 or float(scale) > 4
+    return {
+        "node_count": len(nodes),
+        "connection_count": len(canvas.get("connections") or []),
+        "broken_connections": len(broken_connections),
+        "invalid_nodes": invalid_nodes,
+        "invalid_viewport": invalid_viewport,
+        "can_fit": bool(nodes),
+        "summary": "画布结构正常" if not broken_connections and not invalid_nodes and not invalid_viewport else "发现可修复的画布结构问题",
+    }
 
 def normalize_canvas_kind(kind="classic"):
     return "smart" if str(kind or "").strip().lower() == "smart" else "classic"
@@ -4932,6 +5157,8 @@ AUTO_BILLING_LAST_STATE = {}
 AUTO_BILLING_CACHE_SECONDS = 300
 AUTO_PRICING_CACHE = {}
 AUTO_PRICING_CACHE_SECONDS = 600
+AUTO_PRICING_DIAGNOSTIC = {}
+AUTO_BILLING_DIAGNOSTIC = {}
 
 def provider_billing_root_candidates(provider):
     base = str((provider or {}).get("base_url") or "").strip().rstrip("/")
@@ -5071,18 +5298,29 @@ async def provider_dynamic_pricing(provider, model, kind="image", force=False):
     """Discover the selected provider's own public model price metadata."""
     provider_id = str((provider or {}).get("id") or "").strip()
     model = str(model or "").strip()
+    kind = str(kind or "image").strip().lower()
+    diagnostic_key = (provider_id, model, kind)
     if not model or provider_id in {"modelscope", "runninghub", "volcengine", "jimeng", "codex", "gemini-cli"}:
+        AUTO_PRICING_DIAGNOSTIC[diagnostic_key] = {"reason": "unsupported_protocol", "message": "该平台没有通用的公开费率接口"}
         return None
     if provider_protocol(provider) != "openai":
+        AUTO_PRICING_DIAGNOSTIC[diagnostic_key] = {"reason": "unsupported_protocol", "message": "当前平台不是 OpenAI 兼容协议"}
         return None
     roots = provider_billing_root_candidates(provider)
-    if not roots or not provider_env_key_value(provider_id):
+    if not roots:
+        AUTO_PRICING_DIAGNOSTIC[diagnostic_key] = {"reason": "invalid_base_url", "message": "当前接口没有有效的 Base URL"}
         return None
-    cache_key = (provider_id or roots[0], model, str(kind or "image"))
+    if not provider_env_key_value(provider_id):
+        AUTO_PRICING_DIAGNOSTIC[diagnostic_key] = {"reason": "missing_api_key", "message": "当前电脑没有保存这个 API 的 Key"}
+        return None
+    cache_key = (provider_id or roots[0], model, kind)
     now = time.monotonic()
     cached = AUTO_PRICING_CACHE.get(cache_key)
     if not force and cached and cached[0] > now:
         return cached[1]
+    status_counts = {}
+    saw_json = False
+    saw_unrecognized_json = False
     try:
         headers = api_headers(provider=provider, model=model)
         timeout = httpx.Timeout(connect=4.0, read=6.0, write=4.0, pool=4.0)
@@ -5106,18 +5344,38 @@ async def provider_dynamic_pricing(provider, model, kind="image", force=False):
                 await asyncio.gather(*requests_to_probe, return_exceptions=True)
                 responses = []
             for response in responses:
-                if isinstance(response, Exception) or response.status_code != 200:
+                if isinstance(response, Exception):
+                    status_counts["network_error"] = status_counts.get("network_error", 0) + 1
+                    continue
+                status_counts[str(response.status_code)] = status_counts.get(str(response.status_code), 0) + 1
+                if response.status_code != 200:
                     continue
                 try:
-                    found = _find_pricing_for_model(response.json(), model, kind)
+                    payload = response.json()
+                    saw_json = True
+                    found = _find_pricing_for_model(payload, model, kind)
                 except Exception:
                     continue
                 if found and found.get("unit_price") is not None and found.get("currency"):
                     found.update({"model": model, "kind": kind, "source": "dynamic_pricing", "fetched_at": time.time()})
                     AUTO_PRICING_CACHE[cache_key] = (now + AUTO_PRICING_CACHE_SECONDS, found)
+                    AUTO_PRICING_DIAGNOSTIC[diagnostic_key] = {"reason": "ok", "message": "已读取当前接口公开费率", "status_counts": status_counts}
                     return found
+                if saw_json:
+                    saw_unrecognized_json = True
     except Exception:
-        pass
+        AUTO_PRICING_DIAGNOSTIC[diagnostic_key] = {"reason": "network_error", "message": "读取当前接口费率时网络请求失败", "status_counts": status_counts}
+        AUTO_PRICING_CACHE[cache_key] = (now + 120, None)
+        return None
+    if status_counts.get("401") or status_counts.get("403"):
+        reason, message = "pricing_unauthorized", "当前 API Key 无权读取公开费率接口"
+    elif saw_unrecognized_json:
+        reason, message = "pricing_format_unknown", "接口返回了数据，但没有识别到当前模型的费率字段"
+    elif status_counts and all(code in {"404", "405"} for code in status_counts):
+        reason, message = "pricing_endpoint_not_found", "当前接口没有公开费率地址"
+    else:
+        reason, message = "pricing_unavailable", "当前接口未公开可识别的模型费率"
+    AUTO_PRICING_DIAGNOSTIC[diagnostic_key] = {"reason": reason, "message": message, "status_counts": status_counts}
     AUTO_PRICING_CACHE[cache_key] = (now + 120, None)
     return None
 
@@ -5278,10 +5536,16 @@ async def provider_billing_snapshot(provider, force=False):
     roots = provider_billing_root_candidates(provider)
     provider_id = str((provider or {}).get("id") or "")
     if provider_id in {"modelscope", "runninghub", "volcengine", "jimeng", "codex", "gemini-cli"}:
+        AUTO_BILLING_DIAGNOSTIC[provider_id] = {"reason": "unsupported_protocol", "message": "该平台没有通用账单接口"}
         return None
     if provider_protocol(provider) != "openai":
+        AUTO_BILLING_DIAGNOSTIC[provider_id] = {"reason": "unsupported_protocol", "message": "当前平台不是 OpenAI 兼容协议"}
         return None
-    if not roots or not provider_env_key_value(provider_id):
+    if not roots:
+        AUTO_BILLING_DIAGNOSTIC[provider_id] = {"reason": "invalid_base_url", "message": "当前接口没有有效的 Base URL"}
+        return None
+    if not provider_env_key_value(provider_id):
+        AUTO_BILLING_DIAGNOSTIC[provider_id] = {"reason": "missing_api_key", "message": "当前电脑没有保存这个 API 的 Key"}
         return None
     provider_id = provider_id or roots[0]
     now = time.monotonic()
@@ -5289,6 +5553,7 @@ async def provider_billing_snapshot(provider, force=False):
     if not force and cached_support and cached_support[0] > now and cached_support[1] is False:
         return None
     headers = api_headers(provider=provider)
+    status_counts = {}
     timeout = httpx.Timeout(connect=5.0, read=8.0, write=5.0, pool=5.0)
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         for root in roots:
@@ -5310,6 +5575,7 @@ async def provider_billing_snapshot(provider, force=False):
                         headers=headers,
                         params=params,
                     )
+                    status_counts[str(response.status_code)] = status_counts.get(str(response.status_code), 0) + 1
                     if response.status_code != 200:
                         continue
                     payload = response.json()
@@ -5326,17 +5592,26 @@ async def provider_billing_snapshot(provider, force=False):
                                 "source": "openai_dashboard",
                             }
                             AUTO_BILLING_LAST_STATE[provider_id] = "billing_available"
+                            AUTO_BILLING_DIAGNOSTIC[provider_id] = {"reason": "ok", "message": "已读取上游账单", "status_counts": status_counts}
                             return snapshot
                     snapshot = billing_snapshot_from_payload(payload, status)
                     if not snapshot:
                         continue
                     AUTO_BILLING_SUPPORT_CACHE[provider_id] = (now + AUTO_BILLING_CACHE_SECONDS, True)
                     AUTO_BILLING_LAST_STATE[provider_id] = "quota_only" if snapshot.get("total_amount") is None else "billing_available"
+                    AUTO_BILLING_DIAGNOSTIC[provider_id] = {"reason": "quota_only" if snapshot.get("total_amount") is None else "ok", "message": "已读取上游额度" if snapshot.get("total_amount") is None else "已读取上游账单", "status_counts": status_counts}
                     return snapshot
                 except Exception:
                     continue
     AUTO_BILLING_SUPPORT_CACHE[provider_id] = (now + AUTO_BILLING_CACHE_SECONDS, False)
     AUTO_BILLING_LAST_STATE[provider_id] = "unavailable"
+    if status_counts.get("401") or status_counts.get("403"):
+        reason, message = "billing_unauthorized", "当前 API Key 无权读取上游账单"
+    elif status_counts and all(code in {"404", "405"} for code in status_counts):
+        reason, message = "billing_endpoint_not_found", "当前接口没有公开账单地址"
+    else:
+        reason, message = "billing_unavailable", "当前接口没有返回可换算的账单数据"
+    AUTO_BILLING_DIAGNOSTIC[provider_id] = {"reason": reason, "message": message, "status_counts": status_counts}
     return None
 
 
@@ -5354,6 +5629,12 @@ def generation_cost_status(provider, cost=None):
         return "已检测到上游额度，但接口未提供货币换算规则"
     if state == "billing_available":
         return "已检测账单接口，但本次未返回可分配的费用差额"
+    diagnostic = AUTO_BILLING_DIAGNOSTIC.get(provider_id) or {}
+    if diagnostic.get("message"):
+        return diagnostic["message"]
+    pricing = next((value for key, value in AUTO_PRICING_DIAGNOSTIC.items() if key[0] == provider_id), None)
+    if pricing and pricing.get("message"):
+        return pricing["message"]
     return "该接口未提供费用信息，暂时无法自动计算"
 
 async def finalize_automatic_billing_group(provider, group):
@@ -5368,16 +5649,12 @@ async def finalize_automatic_billing_group(provider, group):
     automatic_total = None
     if before:
         after = None
-        # Some compatible billing dashboards update a moment after the result is returned.
-        for delay in (0.0, 0.8, 1.5, 2.5):
-            if delay:
-                await asyncio.sleep(delay)
-            after = await provider_billing_snapshot(provider, force=True)
-            if after and after.get("currency") == before.get("currency"):
-                before_value = before.get("total_amount") if before.get("total_amount") is not None else before.get("total_quota")
-                after_value = after.get("total_amount") if after.get("total_amount") is not None else after.get("total_quota")
-                if before_value is not None and after_value is not None and float(after_value) > float(before_value) + 1e-9:
-                    break
+        # Never hold the generated image while waiting for a delayed billing dashboard.
+        # Reported usage and cached pricing are still used immediately when available.
+        try:
+            after = await asyncio.wait_for(provider_billing_snapshot(provider, force=True), timeout=1.2)
+        except Exception:
+            after = None
         if after and after.get("currency") == before.get("currency"):
             before_value = before.get("total_amount") if before.get("total_amount") is not None else before.get("total_quota")
             after_value = after.get("total_amount") if after.get("total_amount") is not None else after.get("total_quota")
@@ -5426,10 +5703,14 @@ async def run_with_automatic_billing(provider, operation, weight=1.0, model="", 
     if not model:
         models = provider.get("image_models") if kind == "image" else provider.get("chat_models") if kind == "chat" else provider.get("video_models")
         model = str((models or [""])[0] or "").strip()
-    dynamic_pricing = await provider_dynamic_pricing(provider, model, kind) if model else None
+    # 费率探测不能阻塞实际生成；上游实际扣费/账单差额仍然是第一优先级。
+    pricing_task = asyncio.create_task(provider_dynamic_pricing(provider, model, kind)) if model else None
     async with group["lock"]:
         if int(group.get("active") or 0) == 0:
-            group["before"] = await provider_billing_snapshot(provider)
+            try:
+                group["before"] = await asyncio.wait_for(provider_billing_snapshot(provider), timeout=1.2)
+            except Exception:
+                group["before"] = None
             group["members"] = []
         group["active"] = int(group.get("active") or 0) + 1
         group["members"].append(member)
@@ -5451,7 +5732,16 @@ async def run_with_automatic_billing(provider, operation, weight=1.0, model="", 
         group["active"] = max(0, int(group.get("active") or 0) - 1)
         if group["active"] == 0:
             await finalize_automatic_billing_group(provider, group)
-    automatic_cost = await member["future"]
+    try:
+        automatic_cost = await asyncio.wait_for(asyncio.shield(member["future"]), timeout=1.5)
+    except asyncio.TimeoutError:
+        automatic_cost = None
+    try:
+        dynamic_pricing = await asyncio.wait_for(pricing_task, timeout=0.35) if pricing_task else None
+    except Exception:
+        if pricing_task and not pricing_task.done():
+            pricing_task.cancel()
+        dynamic_pricing = None
     raw_items = dynamic_raw_items(result)
     reported_cost = generation_cost_for_results(raw_items, provider, model, kind, weight) if raw_items else None
     automatic_cost = automatic_cost or reported_cost or dynamic_generation_cost(dynamic_pricing, raw_items, kind, weight)
@@ -10198,9 +10488,11 @@ async def save_ai_image_to_output(image_data, prefix="online_", category="output
         return value
     value = rewrite_runninghub_file_url(value)
     try:
-        timeout = httpx.Timeout(connect=20.0, read=300.0, write=60.0, pool=20.0)
+        # The upstream task is already complete at this point. Do not keep the
+        # canvas waiting for a slow CDN copy; the remote URL is a safe fallback.
+        timeout = httpx.Timeout(connect=8.0, read=15.0, write=15.0, pool=8.0)
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            response = await client.get(value)
+            response = await asyncio.wait_for(client.get(value), timeout=18.0)
             response.raise_for_status()
             content_type = response.headers.get("Content-Type", "")
             if "jpeg" in content_type or "jpg" in content_type:
@@ -13837,6 +14129,7 @@ async def ai_config():
     preferred_chat_model = next((m for m in CHAT_MODELS if m == "gpt-5.5"), CHAT_MODELS[0] if CHAT_MODELS else CHAT_MODEL)
     providers = public_api_providers()
     return {
+        "app_version": current_app_version(),
         "base_url": AI_BASE_URL,
         "chat_model": preferred_chat_model,
         "image_model": IMAGE_MODEL,
@@ -14611,7 +14904,20 @@ async def fetch_provider_dynamic_pricing(provider_id: str, model: str = "", kind
     if not model:
         model = ((provider.get("image_models") if kind == "image" else provider.get("chat_models") if kind == "chat" else provider.get("video_models")) or [""])[0]
     pricing = await provider_dynamic_pricing(provider, model, kind, force=force)
-    return {"provider_id": provider_id, "model": model, "kind": kind, "pricing": pricing, "automatic": True, "message": "已读取当前接口公开费率" if pricing else "当前接口未公开可识别的模型费率"}
+    billing = await provider_billing_snapshot(provider, force=force)
+    diagnostic = AUTO_PRICING_DIAGNOSTIC.get((str(provider_id or "").strip(), model, kind)) or {}
+    billing_diagnostic = AUTO_BILLING_DIAGNOSTIC.get(str(provider_id or "").strip()) or {}
+    return {
+        "provider_id": provider_id,
+        "model": model,
+        "kind": kind,
+        "pricing": pricing,
+        "billing": billing,
+        "diagnostic": diagnostic,
+        "billing_diagnostic": billing_diagnostic,
+        "automatic": True,
+        "message": "已读取当前接口公开费率" if pricing else (billing_diagnostic.get("message") or diagnostic.get("message") or "当前接口未提供可换算费用"),
+    }
 
 async def build_online_image_result(payload: OnlineImageRequest):
     provider = get_api_provider(payload.provider_id)
@@ -14640,10 +14946,14 @@ async def build_online_image_result(payload: OnlineImageRequest):
             image_items = extract_images(raw_item) if isinstance(raw_item, dict) else [image_data]
         except HTTPException:
             image_items = [image_data]
+        # Store batch results concurrently so one slow image cannot delay every
+        # other result. save_ai_image_to_output falls back to the remote URL.
+        stored_urls = await asyncio.gather(*(
+            save_ai_image_to_output(item, prefix="online_") for item in image_items
+        ))
         local_urls = []
         local_items = []
-        for item in image_items:
-            local_url = await save_ai_image_to_output(item, prefix="online_")
+        for item, local_url in zip(image_items, stored_urls):
             if local_url:
                 local_urls.append(local_url)
                 local_items.append(image_output_meta(local_url, item))
@@ -15066,10 +15376,12 @@ async def query_image_task(payload: ImageTaskQueryRequest):
     except HTTPException:
         image_items = []
     if image_items:
+        stored_urls = await asyncio.gather(*(
+            save_ai_image_to_output(item, prefix="online_") for item in image_items
+        ))
         local_urls = []
         local_items = []
-        for item in image_items:
-            local_url = await save_ai_image_to_output(item, prefix="online_")
+        for item, local_url in zip(image_items, stored_urls):
             if local_url:
                 local_urls.append(local_url)
                 local_items.append(image_output_meta(local_url, item))
@@ -15111,25 +15423,31 @@ async def query_image_task(payload: ImageTaskQueryRequest):
     }
 
 async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
-    with CANVAS_TASK_LOCK:
-        if task_id in CANVAS_TASKS:
-            CANVAS_TASKS[task_id]["status"] = "running"
-            CANVAS_TASKS[task_id]["updated_at"] = time.time()
+    if not await wait_for_canvas_task_slot(task_id):
+        return
     try:
         result = await build_online_image_result(payload)
         with CANVAS_TASK_LOCK:
-            CANVAS_TASKS[task_id].update({
+            task = CANVAS_TASKS.get(task_id)
+            if not task or task.get("status") == "cancelled":
+                return
+            task.update({
                 "status": "succeeded",
                 "result": result,
                 "error": "",
                 "updated_at": time.time(),
             })
+            task_center_sync(task)
     except JimengPendingError as exc:
         # 即梦云端还在排队：标记为 jimeng_pending，前端据 submit_id 持久续查（任务未丢失）
         info = jimeng_pending_payload(exc)
         with CANVAS_TASK_LOCK:
-            CANVAS_TASKS[task_id].update({
-                "status": "jimeng_pending",
+            task = CANVAS_TASKS.get(task_id)
+            if not task:
+                return
+            task.update({
+                "status": "running",
+                "provider_status": "jimeng_pending",
                 "jimeng_pending": True,
                 "submit_id": exc.submit_id,
                 "kind": exc.kind,
@@ -15138,34 +15456,32 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
                 "error": "",
                 "updated_at": time.time(),
             })
+            task_center_sync(task)
     except Exception as exc:
         detail = getattr(exc, "detail", None) or str(exc)
         status_code = getattr(exc, "status_code", 500)
         upstream_task_id = getattr(exc, "upstream_task_id", "") or extract_task_id_from_text(detail)
         with CANVAS_TASK_LOCK:
-            CANVAS_TASKS[task_id].update({
+            task = CANVAS_TASKS.get(task_id)
+            if not task:
+                return
+            task.update({
                 "status": "failed",
                 "error": str(detail),
                 "status_code": status_code,
                 "upstream_task_id": upstream_task_id,
                 "updated_at": time.time(),
             })
+            task_center_sync(task)
+    finally:
+        release_canvas_task_slot()
 
 @app.post("/api/canvas-image-tasks")
 async def create_canvas_image_task(payload: OnlineImageRequest):
     task_id = f"canvas_img_{uuid.uuid4().hex}"
     with CANVAS_TASK_LOCK:
-        CANVAS_TASKS[task_id] = {
-            "id": task_id,
-            "type": "online-image",
-            "status": "queued",
-            "created_at": time.time(),
-            "updated_at": time.time(),
-            "result": None,
-            "error": "",
-            "provider_id": payload.provider_id,
-            "model": payload.model,
-        }
+        CANVAS_TASKS[task_id] = canvas_task_record(task_id, "online-image", payload)
+        task_center_sync(CANVAS_TASKS[task_id])
     asyncio.create_task(run_canvas_image_task(task_id, payload))
     return {"task_id": task_id, "status": "queued"}
 
@@ -15178,46 +15494,46 @@ async def get_canvas_image_task(task_id: str):
     return task
 
 async def run_canvas_comfy_task(task_id: str, payload: GenerateRequest):
-    with CANVAS_TASK_LOCK:
-        if task_id in CANVAS_TASKS:
-            CANVAS_TASKS[task_id]["status"] = "running"
-            CANVAS_TASKS[task_id]["updated_at"] = time.time()
+    if not await wait_for_canvas_task_slot(task_id):
+        return
     try:
         result = await asyncio.to_thread(generate, payload)
         if isinstance(result, dict) and result.get("error"):
             raise RuntimeError(str(result.get("error") or "ComfyUI 生成失败"))
         with CANVAS_TASK_LOCK:
-            CANVAS_TASKS[task_id].update({
+            task = CANVAS_TASKS.get(task_id)
+            if not task or task.get("status") == "cancelled":
+                return
+            task.update({
                 "status": "succeeded",
                 "result": result,
                 "error": "",
                 "updated_at": time.time(),
             })
+            task_center_sync(task)
     except Exception as exc:
         detail = getattr(exc, "detail", None) or str(exc)
         status_code = getattr(exc, "status_code", 500)
         with CANVAS_TASK_LOCK:
-            CANVAS_TASKS[task_id].update({
+            task = CANVAS_TASKS.get(task_id)
+            if not task:
+                return
+            task.update({
                 "status": "failed",
                 "error": str(detail),
                 "status_code": status_code,
                 "updated_at": time.time(),
             })
+            task_center_sync(task)
+    finally:
+        release_canvas_task_slot()
 
 @app.post("/api/canvas-comfy-tasks")
 async def create_canvas_comfy_task(payload: GenerateRequest):
     task_id = f"canvas_comfy_{uuid.uuid4().hex}"
     with CANVAS_TASK_LOCK:
-        CANVAS_TASKS[task_id] = {
-            "id": task_id,
-            "type": "comfy",
-            "status": "queued",
-            "created_at": time.time(),
-            "updated_at": time.time(),
-            "result": None,
-            "error": "",
-            "workflow_json": payload.workflow_json,
-        }
+        CANVAS_TASKS[task_id] = canvas_task_record(task_id, "comfy", payload)
+        task_center_sync(CANVAS_TASKS[task_id])
     asyncio.create_task(run_canvas_comfy_task(task_id, payload))
     return {"task_id": task_id, "status": "queued"}
 
@@ -15228,6 +15544,84 @@ async def get_canvas_comfy_task(task_id: str):
     if not task:
         raise HTTPException(status_code=404, detail="ComfyUI 任务不存在，可能服务已重启或任务已过期")
     return task
+
+
+@app.get("/api/task-center")
+async def get_task_center():
+    with CANVAS_TASK_LOCK:
+        store = read_task_center_store()
+        live = {task_id: task_public_record(task) for task_id, task in CANVAS_TASKS.items()}
+        rows = store.get("tasks") or []
+        seen = set()
+        merged = []
+        for row in reversed(rows):
+            task_id = str(row.get("id") or "")
+            merged.append(live.get(task_id, row))
+            seen.add(task_id)
+        for task_id, row in live.items():
+            if task_id not in seen:
+                merged.append(row)
+        return {"settings": {key: store[key] for key in ("max_concurrent", "max_batch_size", "retry_limit", "daily_cost_alert")}, "active": CANVAS_TASK_ACTIVE, "tasks": merged[:120]}
+
+
+@app.put("/api/task-center/settings")
+async def update_task_center_settings(payload: TaskCenterSettingsRequest):
+    with CANVAS_TASK_LOCK:
+        store = read_task_center_store()
+        store.update({
+            "max_concurrent": max(1, min(8, int(payload.max_concurrent))),
+            "max_batch_size": max(1, min(100, int(payload.max_batch_size))),
+            "retry_limit": max(0, min(3, int(payload.retry_limit))),
+            "daily_cost_alert": max(0.0, float(payload.daily_cost_alert)),
+        })
+        write_task_center_store(store)
+    return {"settings": {key: store[key] for key in ("max_concurrent", "max_batch_size", "retry_limit", "daily_cost_alert")}}
+
+
+@app.post("/api/task-center/{task_id}/cancel")
+async def cancel_task_center_task(task_id: str):
+    with CANVAS_TASK_LOCK:
+        task = CANVAS_TASKS.get(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="任务不存在或已过期")
+        if task.get("status") != "queued":
+            raise HTTPException(status_code=409, detail="只能取消尚未提交给上游的排队任务")
+        task.update({"status": "cancelled", "error": "", "updated_at": time.time()})
+        task_center_sync(task)
+    return {"task": task_public_record(task)}
+
+
+@app.post("/api/task-center/{task_id}/retry")
+async def retry_task_center_task(task_id: str):
+    with CANVAS_TASK_LOCK:
+        original = CANVAS_TASKS.get(task_id)
+        if not original:
+            stored = next((item for item in reversed(read_task_center_store().get("tasks") or []) if item.get("id") == task_id), None)
+            raise HTTPException(status_code=404, detail="任务已过期，无法从服务器恢复请求内容")
+        if original.get("status") != "failed":
+            raise HTTPException(status_code=409, detail="只有失败任务可以重试")
+        limit = int(read_task_center_store().get("retry_limit") or 1)
+        if int(original.get("retry_count") or 0) >= limit:
+            raise HTTPException(status_code=409, detail=f"已达到自动重试上限（{limit} 次）")
+        request = dict(original.get("request") or {})
+        task_type = original.get("type")
+        new_id = f"canvas_retry_{uuid.uuid4().hex}"
+        if task_type == "online-image":
+            payload = OnlineImageRequest(**request)
+        elif task_type == "comfy":
+            payload = GenerateRequest(**request)
+        else:
+            raise HTTPException(status_code=400, detail="当前任务类型不支持重试")
+        task = canvas_task_record(new_id, task_type, payload)
+        task["retry_count"] = int(original.get("retry_count") or 0) + 1
+        task["retry_of"] = original.get("id")
+        CANVAS_TASKS[new_id] = task
+        task_center_sync(task)
+    if task_type == "online-image":
+        asyncio.create_task(run_canvas_image_task(new_id, payload))
+    else:
+        asyncio.create_task(run_canvas_comfy_task(new_id, payload))
+    return {"task_id": new_id, "status": "queued"}
 
 # --- 图像生成参数 schema（供客户端动态渲染参数表单，避免把参数写死在前端） ---
 IMAGE_PARAM_RATIOS = [
@@ -16865,6 +17259,100 @@ async def update_canvas_meta(canvas_id: str, payload: CanvasMetaUpdate):
 @app.get("/api/canvases/{canvas_id}")
 async def get_canvas(canvas_id: str):
     return {"canvas": load_canvas(canvas_id)}
+
+@app.get("/api/canvases/{canvas_id}/integrity")
+async def get_canvas_integrity(canvas_id: str):
+    """Return a read-only health report without altering the stored canvas."""
+    return {"report": canvas_integrity_report(load_canvas(canvas_id))}
+
+
+@app.get("/api/canvases/{canvas_id}/snapshots")
+async def get_canvas_snapshots(canvas_id: str):
+    # Snapshots live under runtime/, never alongside user canvas files.
+    load_canvas(canvas_id)
+    return {"snapshots": list_canvas_snapshots(canvas_id)}
+
+
+@app.post("/api/canvases/{canvas_id}/snapshots")
+async def create_canvas_recovery_snapshot(canvas_id: str, payload: Dict[str, Any] = Body(default={})):
+    canvas = load_canvas(canvas_id)
+    reason = str((payload or {}).get("reason") or "manual")
+    return {"snapshot": create_canvas_snapshot(canvas, reason)}
+
+
+@app.post("/api/canvases/{canvas_id}/snapshots/{snapshot_id}/restore")
+async def restore_canvas_snapshot(canvas_id: str, snapshot_id: str):
+    canvas = load_canvas(canvas_id)
+    snapshot = get_canvas_snapshot(canvas_id, snapshot_id)
+    if not snapshot or not isinstance(snapshot.get("canvas"), dict):
+        raise HTTPException(status_code=404, detail="恢复点不存在或已过期")
+    # Keep a new recovery point before replacing only the canvas structure.
+    before = create_canvas_snapshot(canvas, "恢复前自动备份")
+    source = snapshot["canvas"]
+    canvas["nodes"] = copy.deepcopy(source.get("nodes") or [])
+    canvas["connections"] = copy.deepcopy(source.get("connections") or [])
+    canvas["viewport"] = copy.deepcopy(source.get("viewport") or {"x": 0, "y": 0, "scale": 1})
+    canvas["settings"] = copy.deepcopy(source.get("settings") or canvas.get("settings") or {})
+    save_canvas(canvas)
+    await manager.broadcast_canvas_updated(canvas_id, int(canvas.get("updated_at") or now_ms()), "")
+    return {"canvas": canvas, "before_snapshot": before}
+
+
+@app.post("/api/canvases/{canvas_id}/repair")
+async def repair_canvas_structure(canvas_id: str):
+    """Fix only invalid coordinates, viewport values and dangling links.
+
+    No nodes, media references, logs or user API configuration are removed.
+    """
+    canvas = load_canvas(canvas_id)
+    report = canvas_integrity_report(canvas)
+    before = create_canvas_snapshot(canvas, "修复前自动备份")
+    nodes = [node for node in (canvas.get("nodes") or []) if isinstance(node, dict)]
+    node_ids = {str(node.get("id")) for node in nodes if node.get("id")}
+    fixed_nodes = []
+    for index, node in enumerate(nodes):
+        try:
+            x = float(node.get("x", 0))
+            y = float(node.get("y", 0))
+            valid = math.isfinite(x) and math.isfinite(y) and abs(x) <= 100000 and abs(y) <= 100000
+        except Exception:
+            valid = False
+        if not valid:
+            # Keep the node content and bring only its position back to a visible area.
+            node["x"] = 160 + (index % 5) * 340
+            node["y"] = 140 + (index // 5) * 260
+            fixed_nodes.append(str(node.get("id") or index))
+    kept_connections = []
+    removed_connections = 0
+    for connection in canvas.get("connections") or []:
+        if not isinstance(connection, dict):
+            continue
+        source = str(connection.get("from") or connection.get("source") or connection.get("fromId") or "")
+        target = str(connection.get("to") or connection.get("target") or connection.get("toId") or "")
+        if source and target and source in node_ids and target in node_ids:
+            kept_connections.append(connection)
+        else:
+            removed_connections += 1
+    canvas["nodes"] = nodes
+    canvas["connections"] = kept_connections
+    viewport = canvas.get("viewport") if isinstance(canvas.get("viewport"), dict) else {}
+    try:
+        scale = float(viewport.get("scale", 1))
+        viewport_valid = math.isfinite(scale) and 0.04 <= scale <= 4
+    except Exception:
+        viewport_valid = False
+    if not viewport_valid:
+        canvas["viewport"] = {"x": 0, "y": 0, "scale": 1}
+    save_canvas(canvas)
+    await manager.broadcast_canvas_updated(canvas_id, int(canvas.get("updated_at") or now_ms()), "")
+    return {
+        "canvas": canvas,
+        "before_snapshot": before,
+        "report_before": report,
+        "fixed_nodes": fixed_nodes,
+        "removed_connections": removed_connections,
+    }
+
 
 @app.post("/api/canvases/{canvas_id}/touch")
 async def touch_canvas(canvas_id: str):

@@ -10871,7 +10871,7 @@ async function runRhModelNode(node, opts={}){
         setTimeout(() => { node.running = false; refreshRunNodes(node, out); }, 2000);
     }
     try {
-        const taskInfos = await Promise.all(Array.from({length:count}, () => createCanvasImageTask(payload, {cascadeTargetId})));
+        const taskInfos = await Promise.all(Array.from({length:count}, () => createCanvasImageTask(payload, {cascadeTargetId, taskMeta:{nodeId:node.id, label:run.taskLabel || model || 'RunningHub'}})));
         if(!out){
             let outputs = [];
             const completedResults = [];
@@ -11364,6 +11364,9 @@ function refreshGeneratorInputViews(){
 async function runGenerator(genId, opts={}){
     const gen = nodes.find(n => n.id === genId);
     if(!gen || (gen.running && !opts.cascade)) return;
+    // 费用只属于本次生成；历史累计保存在 logs，不应从上一次接口沿用到新请求。
+    delete gen.generationCost;
+    delete gen.generationCostStatus;
     const cascadeTargetId = cascadeTargetIdFromOptions(opts);
     const sources = orderedSources(gen, generatorSources(gen));
     const prompt = sources.map(s => s.prompt).filter(Boolean).join('\n\n');
@@ -11390,7 +11393,7 @@ async function runGenerator(genId, opts={}){
         setTimeout(() => { gen.running = false; refreshRunNodes(gen, out); }, 2000);
     }
     try {
-        const taskInfos = await Promise.all(Array.from({length:count}, () => createCanvasImageTask(payload, {cascadeTargetId})));
+        const taskInfos = await Promise.all(Array.from({length:count}, () => createCanvasImageTask(payload, {cascadeTargetId, taskMeta:{nodeId:gen.id, label:run.taskLabel || payload.model || '图片生成'}})));
         if(!out){
             let outputs = [];
             const completedResults = [];
@@ -11667,6 +11670,8 @@ async function runGeneratorLegacy(genId, opts={}){
 async function runVideoNode(nodeId, opts={}){
     const node = nodes.find(n => n.id === nodeId);
     if(!node || (node.running && !opts.cascade)) return;
+    delete node.generationCost;
+    delete node.generationCostStatus;
     const cascadeTargetId = cascadeTargetIdFromOptions(opts);
     const sources = orderedSources(node, generatorSources(node));
     const prompt = sources.map(s => s.prompt).filter(Boolean).join('\n\n');
@@ -12831,6 +12836,8 @@ async function callCanvasLLM(node, message, messages=[], options={}){
 async function runLLMNode(nodeId, opts={}){
     const node = nodes.find(n => n.id === nodeId);
     if(!node || (node.running && !opts.cascade)) return;
+    delete node.generationCost;
+    delete node.generationCostStatus;
     const cascadeTargetId = cascadeTargetIdFromOptions(opts);
     const input = llmInputText(node) || node.userInput || '';
     if(!input){
@@ -13272,6 +13279,10 @@ function cancelCascade(nodeId){
 async function runLLMChat(nodeId){
     const node = nodes.find(n => n.id === nodeId);
     if(!node || node.running) return;
+    delete node.generationCost;
+    delete node.generationCostStatus;
+    delete node.generationCost;
+    delete node.generationCostStatus;
     const message = (node.chatInput || '').trim();
     if(!message) return;
     node.messages = node.messages || [];
@@ -13774,19 +13785,25 @@ function findPendingTask(taskId){
     return null;
 }
 async function createCanvasImageTask(payload, options={}){
+    const taskPayload = window.StudioCanvasTaskMeta
+        ? window.StudioCanvasTaskMeta(payload, options.taskMeta || {})
+        : payload;
     const res = await cascadeFetch('/api/canvas-image-tasks', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
-        body:JSON.stringify(payload)
+        body:JSON.stringify(taskPayload)
     }, options);
     if(!res.ok) throw new Error(await responseErrorMessage(res, tr('canvas.generationFailed')));
     return res.json();
 }
 async function createCanvasComfyTask(payload, options={}){
+    const taskPayload = window.StudioCanvasTaskMeta
+        ? window.StudioCanvasTaskMeta(payload, options.taskMeta || {})
+        : payload;
     const res = await cascadeFetch('/api/canvas-comfy-tasks', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
-        body:JSON.stringify(payload)
+        body:JSON.stringify(taskPayload)
     }, options);
     if(!res.ok) throw new Error(await responseErrorMessage(res, actionFailed('canvas.comfyGenerate')));
     return res.json();
@@ -13912,7 +13929,7 @@ async function pollCanvasImageTask(taskId, options={}){
                 failCanvasImageTask(taskId, data.error || tr('canvas.generationFailed'), data);
                 return 'failed';
             }
-            await sleep(1800);
+            await sleep(800);
         }
     } catch(err) {
         const message = normalizeCanvasTaskError(err, tr('canvas.generationFailed'));
@@ -13936,7 +13953,7 @@ async function waitCanvasImageTaskResult(taskId, options={}){
         const data = await res.json();
         if(data.status === 'succeeded') return data.result || {};
         if(data.status === 'failed') throw new Error(data.error || tr('canvas.generationFailed'));
-        await sleep(1800);
+        await sleep(800);
     }
 }
 function completeCanvasImageTask(taskId, result){
@@ -15299,6 +15316,8 @@ function insertWorkflowIntoCanvas(imported){
 async function importWorkflowFile(file){
     if(!canvas || !file) return;
     try {
+        // Keep a structure-only restore point before a workflow is appended.
+        await window.StudioCanvasSnapshot?.('导入工作流');
         const form = new FormData();
         form.append('file', file);
         const res = await fetch('/api/canvas-workflows/import', {method:'POST', body:form});
@@ -16255,8 +16274,10 @@ window.addEventListener('blur', () => {
     }
     if(dragNode || resizeNode || llmPaneDrag || dragBoard || minimapDrag || knifeActive) endDrag();
 });
-function deleteSelectedNodes(){
+async function deleteSelectedNodes(){
     if(!canvas || selected.size === 0) return;
+    // Wait for a structure-only recovery point before any selected node is removed.
+    await window.StudioCanvasSnapshot?.('删除节点');
     pushUndo();
     // 收集所有需要删除的 id（含 group 的 items 一并删除）
     const toDelete = new Set();
@@ -16315,6 +16336,16 @@ window.onload = async () => {
     } else {
         window.location.replace(canvasListUrlForProject(rememberedCanvasListProject()));
     }
+};
+window.StudioCanvasTools = {
+    kind:'classic',
+    getCanvasId: () => canvas?.id || '',
+    getNodes: () => nodes || [],
+    getConnections: () => connections || [],
+    fitAll: () => fitAllNodesViewport(),
+    arrange: () => arrangeSelectedCanvasNodes(),
+    save: () => saveCanvas(),
+    reload: () => window.location.reload()
 };
     bindOutputExternalImageDrag(outputLightboxImg, url, outputDownloadName(url));
     bindOutputExternalImageDrag(outputCompareResult, url, outputDownloadName(url));

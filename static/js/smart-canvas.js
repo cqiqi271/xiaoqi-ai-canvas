@@ -142,6 +142,8 @@ let lastMouseWorld = null;
 let lastConfigRefreshAt = 0;
 let smartMinimapState = null;
 let smartMinimapDrag = false;
+let smartViewportRecoveryTimer = null;
+let smartViewportRecoveryAttempts = 0;
 let zoomPreviewState = null;
 let runTimerInterval = null;
 let smartCascadeRunning = false;
@@ -945,6 +947,8 @@ function insertSmartWorkflowIntoCanvas(imported){
 async function importSmartWorkflowFile(file){
     if(!canvas || !file) return;
     try {
+        // Import is additive, but a quick restore point makes the action reversible.
+        await window.StudioCanvasSnapshot?.('导入工作流');
         if(smartWorkflowTransferSub) smartWorkflowTransferSub.textContent = '正在导入工作流...';
         const form = new FormData();
         form.append('file', file);
@@ -2112,6 +2116,58 @@ function applyViewport(){
     renderMinimap();
     scheduleSmartImageResolutionSync(world, 120);
 }
+function smartViewportVisibleNodeCount(){
+    if(!shell || !nodes.length || !Number.isFinite(viewport.scale) || viewport.scale <= 0) return 0;
+    const viewX = -viewport.x / viewport.scale;
+    const viewY = -viewport.y / viewport.scale;
+    const viewW = shell.clientWidth / viewport.scale;
+    const viewH = shell.clientHeight / viewport.scale;
+    if(!Number.isFinite(viewX) || !Number.isFinite(viewY) || viewW <= 0 || viewH <= 0) return 0;
+    const viewRight = viewX + viewW;
+    const viewBottom = viewY + viewH;
+    return nodes.filter(node => {
+        if(!node || node.id === SMART_LOG_PREVIEW_NODE_ID) return false;
+        const rect = nodeRect(node);
+        return Number.isFinite(rect.x) && Number.isFinite(rect.y)
+            && Number.isFinite(rect.width) && Number.isFinite(rect.height)
+            && rect.x + rect.width >= viewX && rect.x <= viewRight
+            && rect.y + rect.height >= viewY && rect.y <= viewBottom;
+    }).length;
+}
+
+function recoverSmartCanvasViewport(){
+    if(!canvas || !nodes.length) return;
+    clearTimeout(smartViewportRecoveryTimer);
+    smartViewportRecoveryAttempts = 0;
+    const check = () => {
+        if(!canvas || !nodes.length) return;
+        if(!shell.clientWidth || !shell.clientHeight){
+            if(smartViewportRecoveryAttempts++ < 8){
+                smartViewportRecoveryTimer = setTimeout(check, 80);
+            }
+            return;
+        }
+        const scale = Number(viewport.scale);
+        const invalidViewport = !Number.isFinite(Number(viewport.x))
+            || !Number.isFinite(Number(viewport.y))
+            || !Number.isFinite(scale)
+            || scale < 0.04
+            || scale > 4;
+        const visibleCount = smartViewportVisibleNodeCount();
+        // 旧版本保存的视口可能只适用于原电脑的窗口尺寸，导致小地图有节点但主画布完全看不到。
+        // 跨电脑打开时也可能只露出极少节点；这种情况同样自动适配，避免用户误以为数据丢失。
+        const sparseViewport = nodes.length >= 4
+            && visibleCount < Math.max(2, Math.ceil(nodes.length * 0.08));
+        if(invalidViewport || visibleCount === 0 || sparseViewport){
+            fitAllNodesViewport();
+            render();
+        } else {
+            renderMinimap();
+        }
+    };
+    requestAnimationFrame(() => requestAnimationFrame(check));
+}
+
 function screenToWorld(event){
     const rect = shell.getBoundingClientRect();
     return {
@@ -6070,6 +6126,7 @@ async function loadCanvas(){
         updateProviderModels();
         applyViewport();
         render();
+        recoverSmartCanvasViewport();
         if(cleanedDetachedInputs || cleanedCompletedState || recoveredLoopOutputs || hiddenCompletedTimers) scheduleSave();
         resumeSmartPendingTasks();
         resumeJimengPendingNodes();
@@ -10184,7 +10241,9 @@ function setDropHighlight(targetId){
     const el = world.querySelector(`.image-node[data-id="${targetId}"]`);
     if(el) el.classList.add('drop-target');
 }
-function deleteNode(id){
+async function deleteNode(id){
+    // Wait for a structure-only recovery point before any node is removed.
+    await window.StudioCanvasSnapshot?.('删除节点');
     pushUndo();
     const deleteIds = new Set([id]);
     nodes.forEach(node => {
@@ -15573,10 +15632,13 @@ function loadNodePromptDraftToInput(node){
     }
 }
 async function createSmartComfyTask(payload){
+    const taskPayload = window.StudioCanvasTaskMeta
+        ? window.StudioCanvasTaskMeta(payload, {label:payload?.model || 'ComfyUI 生成'})
+        : payload;
     const res = await fetch('/api/canvas-comfy-tasks', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
-        body:JSON.stringify(payload)
+        body:JSON.stringify(taskPayload)
     });
     if(!res.ok) throw new Error(await smartResponseErrorMessage(res, tr('smart.errRunFailed')));
     return res.json();
@@ -15898,7 +15960,12 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
                 outputSlot.queued = false;
                 return [];
             }
-            result = {urls:(outputSlot.images || []).map(img => img?.url ? img : null).filter(Boolean), kind:'image'};
+            result = {
+                urls:(outputSlot.images || []).map(img => img?.url ? img : null).filter(Boolean),
+                kind:'image',
+                generationCost:normalizeSmartGenerationCost(outputSlot.generationCost),
+                generationCostStatus:outputSlot.generationCostStatus || ''
+            };
         } else {
             result = await generateUrlsForCurrentSettings(outputSlot, prompt, request.refs || [], runSettings);
         }
@@ -16494,7 +16561,10 @@ async function runApiGeneration(prompt, refs, runSettings=settings){
         n:1,
         reference_images:imageRefsOnly(refs).slice(0, SMART_REFERENCE_IMAGE_MAX)
     };
-    const tasks = await Promise.all(Array.from({length:count}, () => fetch('/api/canvas-image-tasks', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)}).then(async r => {
+    const taskPayload = window.StudioCanvasTaskMeta
+        ? window.StudioCanvasTaskMeta(payload, {label:payload.model || '智能画布生成'})
+        : payload;
+    const tasks = await Promise.all(Array.from({length:count}, () => fetch('/api/canvas-image-tasks', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(taskPayload)}).then(async r => {
         if(!r.ok) throw new Error(await r.text());
         return r.json();
     })));
@@ -16637,7 +16707,8 @@ async function runApiVideoGeneration(prompt, refs, runSettings=settings){
         if(result && result.jimeng_pending) throw new JimengPendingSignal({submitId:result.submit_id, kind:result.kind || 'video', queueInfo:result.queue_info, message:result.message});
         return {
             urls:resultMediaUrls(result),
-            generationCost:normalizeSmartGenerationCost(result.generation_cost)
+            generationCost:normalizeSmartGenerationCost(result.generation_cost),
+            generationCostStatus:result.generation_cost_status || ''
         };
     } finally {
         transientSmartCloudLinks = [];
@@ -17095,7 +17166,7 @@ function extractUpstreamTaskId(text){
     return match ? match[1] : '';
 }
 const activeJimengPolls = new Set();
-const JIMENG_POLL_INTERVAL = 60000;
+const JIMENG_POLL_INTERVAL = 5000;
 const JIMENG_POLL_MAX = 1440;
 function jimengQueueText(queueInfo){
     const qi = queueInfo || {};
@@ -17293,19 +17364,19 @@ async function pollSmartCanvasTask(taskId){
     if(!taskId) throw new Error(tr('smart.errRunFailed'));
     if(activeSmartTaskPolls.has(taskId)) return activeSmartTaskPolls.get(taskId);
     const promise = (async () => {
-        for(let i = 0; i < 900; i++){
-            await new Promise(resolve => setTimeout(resolve, 2000));
+        for(let i = 0; i < 1800; i++){
             const task = await fetch(`/api/canvas-image-tasks/${encodeURIComponent(taskId)}`).then(async r => {
                 if(!r.ok) throw new Error(await r.text());
                 return r.json();
             });
             if(task.status === 'succeeded') return task.result || {};
-            if(task.status === 'jimeng_pending') throw new JimengPendingSignal({submitId:task.submit_id, kind:task.kind, queueInfo:task.queue_info, message:task.message});
+            if(task.status === 'jimeng_pending' || task.provider_status === 'jimeng_pending') throw new JimengPendingSignal({submitId:task.submit_id, kind:task.kind, queueInfo:task.queue_info, message:task.message});
             if(task.status === 'failed'){
                 const recoverTaskId = task.upstream_task_id || extractUpstreamTaskId(task.error || '');
                 if(recoverTaskId) throw new ImageTaskRecoverSignal({taskId, recoverTaskId, providerId:task.provider_id, kind:'image', message:task.error || tr('smart.errRunFailed')});
                 throw new Error(task.error || tr('smart.errRunFailed'));
             }
+            await new Promise(resolve => setTimeout(resolve, 800));
         }
         throw new Error(tr('smart.errRunTimeout'));
     })();
@@ -19187,5 +19258,15 @@ window.onload = async () => {
     await loadCanvas();
     syncApiKindToggleVisibility();
     render();
+};
+window.StudioCanvasTools = {
+    kind:'smart',
+    getCanvasId: () => canvasId || '',
+    getNodes: () => nodes || [],
+    getConnections: () => canvas?.connections || [],
+    fitAll: () => fitAllNodesViewport(),
+    arrange: () => arrangeSelectedSmartNodes(),
+    save: () => saveCanvas(),
+    reload: () => window.location.reload()
 };
     bindSmartPreviewDrag(currentImg, editing.image, 'image');
