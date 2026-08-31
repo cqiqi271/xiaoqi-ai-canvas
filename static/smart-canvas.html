@@ -16,13 +16,14 @@
             } catch(e) {}
         })();
     </script>
-    <script src="/static/vendor/js/lucide.js?v=2026.08.07.13.1785527159"></script>
-    <script src="/static/js/theme.js?v=2026.08.07.13.1786126219"></script>
-    <script src="/static/js/touch-mouse.js?v=2026.08.07.13.1785527159"></script>
-    <script src="/static/js/i18n.js?v=2026.08.07.13.1785527159"></script>
-    <link rel="stylesheet" href="/static/css/smart-canvas.css?v=2026.08.07.13.1786969210">
-    <link rel="stylesheet" href="/static/css/xiaoqi-polish.css?v=2026.08.07.13.1786126306">
-    <link rel="stylesheet" href="/static/css/studio-glass.css?v=2026.08.07.13.1787683878">
+    <script src="/static/vendor/js/lucide.js?v=2026.08.07.17.1785527159"></script>
+    <script src="/static/js/theme.js?v=2026.08.07.17.1786126219"></script>
+    <script src="/static/js/touch-mouse.js?v=2026.08.07.17.1785527159"></script>
+    <script src="/static/js/i18n.js?v=2026.08.07.17.1785527159"></script>
+    <link rel="stylesheet" href="/static/css/smart-canvas.css?v=2026.08.07.17.1786969210">
+    <link rel="stylesheet" href="/static/css/xiaoqi-polish.css?v=2026.08.07.17.1786126306">
+    <link rel="stylesheet" href="/static/css/studio-glass.css?v=2026.08.07.17.1787683878">
+    <link rel="stylesheet" href="/static/css/ecommerce-agent.css?v=2026.08.07.17.1788162254">
 </head>
 <body>
     <div id="shell" class="shell">
@@ -66,6 +67,7 @@
         </div>
         <button class="smart-back" type="button" onclick="backToCanvasList()"><i data-lucide="arrow-left"></i><span data-i18n="canvas.backToList">返回画布列表</span></button>
         <div id="smartTitle" class="smart-title" data-i18n="smart.title">智能画布</div>
+        <button class="smart-workflow-toggle ecommerce-agent-toggle" type="button" data-ecommerce-agent-open style="right:194px"><i data-lucide="bot"></i><span>画布 Agent</span></button>
         <button id="smartCostSummary" class="smart-cost-summary" type="button" aria-haspopup="dialog" aria-expanded="false">今日 ¥0.00 · 0次</button>
         <div id="smartCostPopover" class="cost-stats-popover smart-cost-popover" role="dialog" aria-label="费用统计" hidden>
             <div class="cost-stats-head">
@@ -121,6 +123,10 @@
                         <div class="create-card-title">MiniMax</div>
                         <div class="create-card-sub">时间轴片段生成视频</div>
                     </span>
+                </button>
+                <button class="create-card ecommerce-agent-toggle" type="button" data-create-type="ecommerce-agent">
+                    <span class="create-card-icon"><i data-lucide="bot"></i></span>
+                    <span><div class="create-card-title">画布 Agent</div><div class="create-card-sub">理解选中内容，继续创作并把结果放回画布</div></span>
                 </button>
             </div>
         </div>
@@ -465,8 +471,9 @@
         <div id="toast" class="toast"></div>
         <div id="mentionPreview" class="mention-preview"><img alt="preview"></div>
     </div>
-    <script src="/static/js/smart-canvas.js?v=2026.08.07.13.1788076623"></script>
-    <script src="/static/smart-performance.js?v=2026.08.07.13.1785844899"></script>
-    <script src="/static/js/studio-tools.js?v=2026.08.07.13.1787684978"></script>
+    <script src="/static/js/smart-canvas.js?v=2026.08.07.17.1788162470"></script>
+    <script src="/static/js/ecommerce-agent.js?v=2026.08.07.17.1788162201"></script>
+    <script src="/static/smart-performance.js?v=2026.08.07.17.1788110800"></script>
+    <script src="/static/js/studio-tools.js?v=2026.08.07.17.1787684978"></script>
 </body>
 </html>

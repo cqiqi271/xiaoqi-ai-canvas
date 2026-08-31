@@ -22,7 +22,7 @@
                 });
             }
         });
-        observer.observe(world, {childList: true, subtree: true});
+        if (world instanceof Node) observer.observe(world, {childList: true, subtree: true});
         window.addEventListener('beforeunload', () => observer.disconnect(), {once: true});
     };
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', install, {once: true});

@@ -163,7 +163,7 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 GLOBAL_LOOP = None
-APP_VERSION = "2026.08.07.13"
+APP_VERSION = "2026.08.31"
 GITHUB_REPO_URL = "https://github.com/cqiqi271/xiaoqi-ai-canvas"
 GITHUB_VERSION_URL = "https://raw.githubusercontent.com/cqiqi271/xiaoqi-ai-canvas/main/VERSION"
 GITHUB_TREE_URL = "https://api.github.com/repos/cqiqi271/xiaoqi-ai-canvas/git/trees/main?recursive=1"
@@ -238,6 +238,7 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 CONVERSATION_DIR = os.path.join(DATA_DIR, "conversations")
 CANVAS_DIR = os.path.join(DATA_DIR, "canvases")
 MEDIA_PREVIEW_DIR = os.path.join(DATA_DIR, "media_previews")
+REMOTE_IMAGE_CACHE_TASKS: Dict[str, asyncio.Task] = {}
 ASSET_LIBRARY_PATH = os.path.join(DATA_DIR, "asset_library.json")
 PROMPT_LIBRARY_PATH = os.path.join(DATA_DIR, "prompt_libraries.json")
 API_PROVIDERS_FILE = os.path.join(DATA_DIR, "api_providers.json")
@@ -8128,7 +8129,13 @@ def generate_video_preview_image(path: str, width: int) -> Image.Image:
 
 @app.get("/api/media-preview")
 async def media_preview(url: str, w: int = 512):
+    url = rewrite_runninghub_file_url(url)
     path = output_file_from_url(url)
+    if not path and re.match(r"^https?://", str(url or ""), re.I):
+        # Generated results are returned to the canvas immediately while the
+        # original is cached in the background. Reuse that download here so
+        # the browser only decodes a small preview instead of a 2K/4K image.
+        path = await ensure_remote_image_cached(url, "output")
     if not path or not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="媒体文件不存在")
 
@@ -10487,26 +10494,80 @@ async def save_ai_image_to_output(image_data, prefix="online_", category="output
     if value.startswith("/output/") or value.startswith("/assets/"):
         return value
     value = rewrite_runninghub_file_url(value)
+    if re.match(r"^https?://", value, re.I):
+        schedule_remote_image_cache(value, category)
+    return value
+
+def remote_image_cache_key(url: str) -> str:
+    return hashlib.sha1(str(url or "").encode("utf-8", "ignore")).hexdigest()[:24]
+
+def cached_remote_image_path(url: str, category: str = "output") -> Optional[str]:
+    folder, _ = output_storage(category)
+    matches = glob.glob(os.path.join(folder, f"remote_{remote_image_cache_key(url)}.*"))
+    return next((path for path in matches if os.path.isfile(path) and not path.endswith(".part")), None)
+
+def remote_image_extension(url: str, content_type: str = "") -> str:
+    mime = str(content_type or "").split(";", 1)[0].strip().lower()
+    by_mime = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/gif": ".gif", "image/avif": ".avif"}
+    if mime in by_mime:
+        return by_mime[mime]
+    ext = os.path.splitext(urllib.parse.urlparse(str(url or "")).path)[1].lower()
+    return ext if ext in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif", ".bmp", ".tif", ".tiff"} else ".png"
+
+async def cache_remote_image_to_output(url: str, category: str = "output") -> str:
+    existing = cached_remote_image_path(url, category)
+    if existing:
+        return existing
+    folder, _ = output_storage(category)
+    os.makedirs(folder, exist_ok=True)
+    timeout = httpx.Timeout(connect=8.0, read=90.0, write=30.0, pool=8.0)
+    temp_path = os.path.join(folder, f"remote_{remote_image_cache_key(url)}.part")
     try:
-        # The upstream task is already complete at this point. Do not keep the
-        # canvas waiting for a slow CDN copy; the remote URL is a safe fallback.
-        timeout = httpx.Timeout(connect=8.0, read=15.0, write=15.0, pool=8.0)
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            response = await asyncio.wait_for(client.get(value), timeout=18.0)
-            response.raise_for_status()
-            content_type = response.headers.get("Content-Type", "")
-            if "jpeg" in content_type or "jpg" in content_type:
-                filename = filename[:-4] + ".jpg"
-                path = output_path_for(filename, category)
-            elif "webp" in content_type:
-                filename = filename[:-4] + ".webp"
-                path = output_path_for(filename, category)
-            with open(path, "wb") as f:
-                f.write(response.content)
-            return output_url_for(filename, category)
-    except Exception as e:
-        print(f"保存上游图片失败: {e}; url={value}")
-        return value
+            async with client.stream("GET", url) as response:
+                response.raise_for_status()
+                content_type = response.headers.get("Content-Type", "")
+                if "text/html" in content_type.lower() or "application/json" in content_type.lower():
+                    raise ValueError(f"远程地址不是图片：{content_type}")
+                final_path = os.path.join(folder, f"remote_{remote_image_cache_key(url)}{remote_image_extension(url, content_type)}")
+                with open(temp_path, "wb") as output:
+                    async for chunk in response.aiter_bytes(256 * 1024):
+                        if chunk:
+                            output.write(chunk)
+                if not os.path.exists(temp_path) or os.path.getsize(temp_path) <= 0:
+                    raise ValueError("远程图片内容为空")
+                os.replace(temp_path, final_path)
+                return final_path
+    finally:
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
+
+def schedule_remote_image_cache(url: str, category: str = "output"):
+    key = f"{category}:{remote_image_cache_key(url)}"
+    current = REMOTE_IMAGE_CACHE_TASKS.get(key)
+    if current and not current.done():
+        return current
+    async def _run():
+        try:
+            return await cache_remote_image_to_output(url, category)
+        except Exception as exc:
+            print(f"后台保存上游图片失败: {exc}; url={url}")
+            return ""
+        finally:
+            REMOTE_IMAGE_CACHE_TASKS.pop(key, None)
+    task = asyncio.create_task(_run())
+    REMOTE_IMAGE_CACHE_TASKS[key] = task
+    return task
+
+async def ensure_remote_image_cached(url: str, category: str = "output") -> Optional[str]:
+    existing = cached_remote_image_path(url, category)
+    if existing:
+        return existing
+    task = schedule_remote_image_cache(url, category)
+    return await task if task else None
 
 def image_output_meta(url, source_item=None):
     meta = {"url": url, "kind": "image"}
@@ -12744,6 +12805,8 @@ def view_image(filename: str, type: str = "input", subfolder: str = ""):
 def download_output(request: Request, url: str, name: str = "", inline: bool = False):
     url = rewrite_runninghub_file_url(url)
     path = output_file_from_url(url)
+    if not path and re.match(r"^https?://", str(url or ""), re.I):
+        path = cached_remote_image_path(url, "output")
     if not path:
         path = local_media_file_by_basename(filename_from_media_url(url, ""))
     if path:
@@ -20258,6 +20321,61 @@ def run_workflow(name: str, payload: WorkflowRunRequest):
         client_id=payload.client_id or str(uuid.uuid4()),
     )
     return generate(req)
+
+
+# 电商 Agent 只编排现有任务中心，不建立第二套 API 配置或收费队列。
+# 放在主程序末尾注册，确保所依赖的生成与任务函数都已定义。
+import importlib.util as _importlib_util
+
+_ecommerce_module_path = os.path.join(BASE_DIR, "ecommerce_agent.py")
+_ecommerce_spec = _importlib_util.spec_from_file_location("xiaoqi_ecommerce_agent", _ecommerce_module_path)
+if not _ecommerce_spec or not _ecommerce_spec.loader:
+    raise RuntimeError(f"无法加载电商 Agent 模块：{_ecommerce_module_path}")
+_ecommerce_module = _importlib_util.module_from_spec(_ecommerce_spec)
+sys.modules[_ecommerce_spec.name] = _ecommerce_module
+_ecommerce_spec.loader.exec_module(_ecommerce_module)
+register_ecommerce_agent = _ecommerce_module.register_ecommerce_agent
+
+
+async def ecommerce_submit_image_task(raw: Dict[str, Any]) -> Dict[str, Any]:
+    return await create_canvas_image_task(OnlineImageRequest(**raw))
+
+
+def ecommerce_get_image_task(task_id: str) -> Dict[str, Any]:
+    with CANVAS_TASK_LOCK:
+        return copy.deepcopy(CANVAS_TASKS.get(task_id) or {})
+
+
+def ecommerce_cancel_image_task(task_id: str) -> bool:
+    with CANVAS_TASK_LOCK:
+        task = CANVAS_TASKS.get(task_id)
+        if not task or task.get("status") != "queued":
+            return False
+        task.update({"status": "cancelled", "error": "", "updated_at": time.time()})
+        task_center_sync(task)
+        return True
+
+
+def ecommerce_estimate_cost(provider_id: str, model: str, count: int) -> Optional[Dict[str, Any]]:
+    try:
+        provider = get_api_provider_exact(provider_id)
+        return (
+            configured_generation_cost(provider, model, "image", count)
+            or central_catalog_generation_cost(provider, model, "image", count)
+        )
+    except Exception:
+        return None
+
+
+ECOMMERCE_AGENT = register_ecommerce_agent(
+    app,
+    base_dir=BASE_DIR,
+    submit_image_task=ecommerce_submit_image_task,
+    get_image_task=ecommerce_get_image_task,
+    cancel_image_task=ecommerce_cancel_image_task,
+    public_providers=public_api_providers,
+    estimate_cost=ecommerce_estimate_cost,
+)
 
 if __name__ == "__main__":
     import uvicorn

@@ -52,8 +52,10 @@ function canvasDisplayMediaUrl(url, name=''){
 function canvasMediaPreviewUrl(url, size=512){
     const raw = canvasOriginalMediaUrl(url);
     if(!raw || raw.startsWith('data:') || raw.startsWith('blob:')) return raw;
-    if(!raw.startsWith('/output/') && !raw.startsWith('/assets/')) return canvasDisplayMediaUrl(raw);
-    if(!/\.(png|jpe?g|webp|gif|bmp|avif|tiff?|mp4|webm|mov|m4v|avi|mkv|flv)(\?|#|$)/i.test(raw)) return raw;
+    const isRemote = /^https?:\/\//i.test(raw);
+    const isLocalMedia = raw.startsWith('/output/') || raw.startsWith('/assets/');
+    if(!isRemote && !isLocalMedia) return canvasDisplayMediaUrl(raw);
+    if(!isRemote && !/\.(png|jpe?g|webp|gif|bmp|avif|tiff?)(\?|#|$)/i.test(raw)) return raw;
     const width = Math.max(64, Math.min(2048, Math.round(Number(size) || 512)));
     return `/api/media-preview?w=${width}&url=${encodeURIComponent(raw)}`;
 }
@@ -62,7 +64,9 @@ function canvasPreviewImgHtml(url, size=512, attrs=''){
     const preview = canvasMediaPreviewUrl(original, size);
     // loading=lazy：画布内容多时，视口外的缩略图不加载/不解码，避免一次性解码上百张图卡顿；
     // decoding=async：解码放到主线程外，渲染时不阻塞。
-    return `<img loading="lazy" decoding="async" src="${escapeAttr(preview)}" data-preview-src="${escapeAttr(preview)}" data-original-src="${escapeAttr(original)}" data-url="${escapeAttr(original)}"${attrs ? ` ${attrs}` : ''}>`;
+    const loading = /(?:^|\s)loading=/.test(attrs) ? '' : ' loading="lazy"';
+    const decoding = /(?:^|\s)decoding=/.test(attrs) ? '' : ' decoding="async"';
+    return `<img${loading}${decoding} src="${escapeAttr(preview)}" data-preview-src="${escapeAttr(preview)}" data-original-src="${escapeAttr(original)}" data-url="${escapeAttr(original)}"${attrs ? ` ${attrs}` : ''}>`;
 }
 function loadCanvasOriginalImageDimensions(url){
     const src = String(url || '');
@@ -135,8 +139,8 @@ function bindCanvasPreviewImageFallbacks(root=document){
         });
     });
 }
-const CANVAS_SELECTED_HIGH_RES_DELAY = 320;
-const CANVAS_HIGH_RES_ZOOM_THRESHOLD = 0.86;
+const CANVAS_SELECTED_HIGH_RES_DELAY = 1200;
+const CANVAS_HIGH_RES_ZOOM_THRESHOLD = 1.25;
 let canvasSelectedHighResTimer = 0;
 let canvasSelectedHighResSeq = 0;
 let canvasImageResolutionSyncTimer = 0;
@@ -180,7 +184,8 @@ function syncCanvasSelectedImageResolution(root=nodesEl){
         if(img.dataset.previewKind === 'video') return;
         const preview = img.dataset.previewSrc || '';
         const original = img.dataset.originalSrc || img.dataset.url || '';
-        if(!wantHighRes || !canvasImageNearViewport(img)){
+        const nodeId = img.closest('.node')?.dataset?.id || '';
+        if(!wantHighRes || !selected.has(nodeId) || !canvasImageNearViewport(img)){
             delete img.dataset.selectedHighResTarget;
             if(preview && img.getAttribute('src') !== preview) img.src = preview;
             return;
@@ -201,7 +206,7 @@ function syncCanvasSelectedImageResolution(root=nodesEl){
     canvasSelectedHighResTimer = setTimeout(async () => {
         canvasSelectedHighResTimer = 0;
         if(seq !== canvasSelectedHighResSeq || canvasImageEditorIsOpen()) return;
-        await Promise.all(selectedImages.map(item => preloadCanvasSelectedHighRes(item.target)));
+        await Promise.all(selectedImages.slice(0, 2).map(item => preloadCanvasSelectedHighRes(item.target)));
         if(seq !== canvasSelectedHighResSeq || canvasImageEditorIsOpen()) return;
         selectedImages.forEach(({img, target}) => {
             if(!img.isConnected || img.dataset.selectedHighResTarget !== target) return;
@@ -2569,6 +2574,15 @@ function addPromptNode(point){
     const p = point || defaultPoint(0, 0);
     return addNode({id:uid('prompt'), type:'prompt', x:p.x, y:p.y, text:''});
 }
+function addEcommerceAgentNode(point){
+    const p = point || defaultPoint(80, 0);
+    return addNode({
+        id:uid('ecommerce'), type:'ecommerce-agent', x:p.x, y:p.y, w:360, h:250,
+        title:'画布 Agent', runId:'', status:'idle', currentStage:'等待选择素材',
+        progress:0, totalImages:0, successCount:0, failedCount:0, retryCount:0,
+        actualCost:null, appliedOutputIds:[], resultGroupId:''
+    });
+}
 function addLoopNode(point){
     const p = point || defaultPoint(40, 0);
     return addNode({
@@ -3676,6 +3690,7 @@ function createNodeByType(type, point){
     if(type === 'comfy') return addComfyNode(point);
     if(type === 'ltxDirector') return addLTXDirectorNode(point);
     if(type === 'output') return addOutputNode(point);
+    if(type === 'ecommerce-agent') return addEcommerceAgentNode(point);
     return null;
 }
 function menuAdd(type){
@@ -3693,6 +3708,7 @@ function menuAdd(type){
     if(type === 'comfy') addComfyNode(menuPoint);
     if(type === 'ltxDirector') addLTXDirectorNode(menuPoint);
     if(type === 'output') addOutputNode(menuPoint);
+    if(type === 'ecommerce-agent') addEcommerceAgentNode(menuPoint);
 }
 function mediaKindForUpload(file){
     const type = String(file?.type || '').toLowerCase();
@@ -5510,7 +5526,13 @@ function openImageEditor(nodeId, initialMode='crop'){
         syncImageEditOverflow();
         refreshIcons();
     };
-    img.crossOrigin = 'anonymous';
+    img.onerror = () => {
+        if(img.dataset.editorQuick === '1' && fullEditorSrc && img.getAttribute('src') !== fullEditorSrc){
+            img.dataset.editorQuick = '';
+            img.src = fullEditorSrc;
+        }
+    };
+    img.removeAttribute('crossorigin');
     const fullEditorSrc = canvasDisplayMediaUrl(node.url, node.name || '');
     const quickEditorSrc = canvasMediaPreviewUrl(node.url, initialMode === 'preview' ? 1536 : 2048);
     if(quickEditorSrc && quickEditorSrc !== fullEditorSrc){
@@ -5519,7 +5541,16 @@ function openImageEditor(nodeId, initialMode='crop'){
             setTimeout(() => {
                 if(!cropState || cropState.nodeId !== nodeId) return;
                 if(!modal.classList.contains('open') || img.dataset.editorSrcToken !== editorSrcToken) return;
-                if(img.getAttribute('src') !== fullEditorSrc) img.src = fullEditorSrc;
+                if(img.getAttribute('src') !== fullEditorSrc) {
+                    // 后台预加载高清图，成功后再替换已经显示的快速预览，避免远程图卡住时白屏。
+                    const full = new Image();
+                    full.onload = () => {
+                        if(!modal.classList.contains('open') || img.dataset.editorSrcToken !== editorSrcToken) return;
+                        img.src = fullEditorSrc;
+                    };
+                    full.onerror = () => {};
+                    full.src = fullEditorSrc;
+                }
             }, initialMode === 'preview' ? 120 : 60);
         });
     } else {
@@ -6213,7 +6244,7 @@ function renderNode(node){
         if(node.type === 'output') openOutputNodeMenu(node.id, e.clientX, e.clientY);
         else openGeneratorNodeMenu(node.id, e.clientX, e.clientY);
     };
-    const title = node.type === 'image' ? 'Image' : node.type === 'prompt' ? 'Prompt' : node.type === 'loop' ? tr('canvas.loopNode') : node.type === 'promptGroup' ? 'Prompts' : node.type === 'group' ? 'Group' : node.type === 'output' ? 'Output' : node.type === 'llm' ? 'LLM' : node.type === 'comfy' ? 'ComfyUI' : node.type === 'ltxDirector' ? tr('canvas.ltxDirector') : node.type === 'rh' ? 'RunningHub' : node.type === 'minimax' ? 'MiniMax H3' : node.type === 'midjourney' ? 'Midjourney' : node.type === 'msgen' ? tr('canvas.modelscopeGenerate') : node.type === 'video' ? tr('canvas.videoGenerateNode') : tr('canvas.apiGenerate');
+    const title = node.type === 'image' ? 'Image' : node.type === 'prompt' ? 'Prompt' : node.type === 'loop' ? tr('canvas.loopNode') : node.type === 'promptGroup' ? 'Prompts' : node.type === 'group' ? 'Group' : node.type === 'ecommerce-agent' ? '画布 Agent' : node.type === 'output' ? 'Output' : node.type === 'llm' ? 'LLM' : node.type === 'comfy' ? 'ComfyUI' : node.type === 'ltxDirector' ? tr('canvas.ltxDirector') : node.type === 'rh' ? 'RunningHub' : node.type === 'minimax' ? 'MiniMax H3' : node.type === 'midjourney' ? 'Midjourney' : node.type === 'msgen' ? tr('canvas.modelscopeGenerate') : node.type === 'video' ? tr('canvas.videoGenerateNode') : tr('canvas.apiGenerate');
     const displayTitle = node.type === 'image' && node.url ? nodeTitleForMedia(node) : title;
     // 失败徽章只在一键运行模式中显示，单节点失败已通过 alert 提示
     const showStatus = ['generator','midjourney','msgen','comfy','ltxDirector','llm','video','rh','minimax'].includes(node.type) && node.runStatus
@@ -6366,6 +6397,16 @@ function renderNode(node){
         const promptNodes = (node.items || []).map(id => nodes.find(n => n.id === id)).filter(Boolean);
         body.innerHTML = `<div class="text-[11px] text-gray-400">${promptNodes.length} ${tr('canvas.promptCount')} ${tr('canvas.grouped')}</div>`;
     }
+    if(node.type === 'ecommerce-agent') {
+        const status = {idle:'等待资料',queued:'排队中',planning:'规划内容',generating:'生成图片',paused:'已暂停',succeeded:'已完成',partial:'部分完成',failed:'失败',cancelled:'已取消'}[node.status] || node.status || '等待资料';
+        const cost = node.actualCost == null ? '上游未提供' : '¥' + Number(node.actualCost || 0).toFixed(4);
+        body.innerHTML = '<div class="ec-node-body"><div class="ec-node-stage">' + escapeHtml(node.currentStage || status)
+            + '</div><div class="ec-progress" style="--progress:' + Number(node.progress || 0) + '%"><i></i></div>'
+            + '<div class="ec-node-line"><span>' + escapeHtml(status) + '</span><b>' + Number(node.successCount || 0) + ' / ' + Number(node.totalImages || 0) + ' 张</b></div>'
+            + '<div class="ec-node-line"><span>失败 / 重做</span><b>' + Number(node.failedCount || 0) + ' / ' + Number(node.retryCount || 0) + '</b></div>'
+            + '<div class="ec-node-line"><span>实际费用</span><b>' + escapeHtml(cost) + '</b></div>'
+            + '<button class="ec-node-open" type="button" data-ecommerce-agent-open>打开画布 Agent</button></div>';
+    }
     if(node.type === 'llm') body.appendChild(renderLLMBody(node));
     if(node.type === 'generator') body.appendChild(renderGeneratorBody(node));
     if(node.type === 'midjourney') body.appendChild(renderMidjourneyBody(node));
@@ -6394,8 +6435,8 @@ function renderNode(node){
         if(e.button !== 0 || !isNodeDragSurface(e.target)) return;
         startNodeDrag(e, node);
     };
-    const canInput = ['generator','midjourney','comfy','ltxDirector','output','llm','msgen','video','rh','minimax'].includes(node.type) || (node.type === 'loop' && (node.imageInput || node.showPrompt));
-    const canOutput = ['image','prompt','loop','group','promptGroup','generator','midjourney','comfy','ltxDirector','llm','msgen','video','rh','minimax','output'].includes(node.type);
+    const canInput = ['generator','midjourney','comfy','ltxDirector','output','llm','msgen','video','rh','minimax','ecommerce-agent'].includes(node.type) || (node.type === 'loop' && (node.imageInput || node.showPrompt));
+    const canOutput = ['image','prompt','loop','group','promptGroup','generator','midjourney','comfy','ltxDirector','llm','msgen','video','rh','minimax','output','ecommerce-agent'].includes(node.type);
     if(canInput) el.insertAdjacentHTML('beforeend', `<div class="port in" title="${tr('canvas.connectHere')}"></div>`);
     if(canOutput) el.insertAdjacentHTML('beforeend', `<div class="port out" title="${tr('canvas.dragConnect')}"></div>`);
     el.insertAdjacentHTML('beforeend', `<div class="resize-handle" title="${tr('canvas.resize')}"></div>`);
@@ -6587,8 +6628,97 @@ function defaultNodeSize(type){
     if(type === 'comfy') return {w:420, h:460};
     if(type === 'ltxDirector') return {w:1000, h:800};
     if(type === 'output') return {w:460, h:0};
+    if(type === 'ecommerce-agent') return {w:360, h:250};
     return {w:260, h:0};
 }
+
+function ecommerceClassicSnapshot(node){
+    return {
+        id:node.id,
+        type:node.type,
+        title:node.title || '',
+        name:node.name || '',
+        text:node.text || node.outputText || '',
+        url:node.url || '',
+        images:(node.images || []).filter(item => item?.url).slice(0,20).map(item => ({url:item.url,name:item.name || ''}))
+    };
+}
+function ecommerceClassicSelectedNodes(){
+    const result = [];
+    const seen = new Set();
+    const include = node => {
+        if(!node || seen.has(node.id) || node.type === 'ecommerce-agent') return;
+        seen.add(node.id);
+        if(node.type === 'group' || node.type === 'promptGroup'){
+            (node.items || []).forEach(id => include(nodes.find(item => item.id === id)));
+            return;
+        }
+        result.push(ecommerceClassicSnapshot(node));
+    };
+    [...selected].forEach(id => include(nodes.find(node => node.id === id)));
+    return result;
+}
+function ecommerceClassicAgent(run=null){
+    return nodes.find(node => node.type === 'ecommerce-agent' && run?.node_id && node.id === run.node_id)
+        || nodes.find(node => node.type === 'ecommerce-agent' && run?.id && node.runId === run.id)
+        || nodes.find(node => node.type === 'ecommerce-agent');
+}
+function ensureClassicEcommerceAgent(){
+    return ecommerceClassicAgent() || addEcommerceAgentNode(defaultPoint(100, 20));
+}
+function updateClassicEcommerceAgent(run){
+    const node = ecommerceClassicAgent(run) || ensureClassicEcommerceAgent();
+    const next = {
+        runId:run.id, status:run.status, currentStage:run.current_stage || '', progress:Number(run.progress || 0),
+        totalImages:Number(run.total_images || 0), successCount:Number(run.success_count || 0),
+        failedCount:Number(run.failed_count || 0), retryCount:Number(run.retry_count || 0), actualCost:run.actual_cost
+    };
+    const changed = Object.keys(next).some(key => node[key] !== next[key]);
+    if(!changed) return node;
+    Object.assign(node, next);
+    render();
+    scheduleSave();
+    return node;
+}
+function applyClassicEcommerceResults(run){
+    if(run.dry_run) return;
+    const agent = ecommerceClassicAgent(run) || ensureClassicEcommerceAgent();
+    const applied = new Set(agent.appliedOutputIds || []);
+    const fresh = (run.outputs || []).filter(item => item.status === 'succeeded' && item.url && !applied.has(item.id));
+    if(!fresh.length) return;
+    let group = nodes.find(node => node.id === agent.resultGroupId && node.type === 'group');
+    if(!group){
+        group = {id:uid('grp'),type:'group',x:Number(agent.x || 0)+430,y:Number(agent.y || 0)-40,w:430,h:Math.max(320,fresh.length*110),items:[],title:'Agent 结果 · '+(run.product_profile?.name || '未命名素材')};
+        nodes.push(group);
+        agent.resultGroupId = group.id;
+    }
+    fresh.forEach((output,index) => {
+        const column = index % 3;
+        const row = Math.floor(index / 3);
+        const image = {id:uid('img'),type:'image',x:group.x+30+column*290,y:group.y+70+row*390,url:output.url,name:(output.plan?.platform_label || '')+' · '+(output.plan?.purpose || '结果'),ecommerceOutputId:output.id,ecommerceRunId:run.id,generation_cost:output.cost || null,quality_status:output.quality_status || 'needs_review'};
+        nodes.push(image);
+        group.items.push(image.id);
+        (output.text_layers || []).forEach((layer,layerIndex) => {
+            const prompt = {id:uid('prompt'),type:'prompt',x:image.x,y:image.y+300+layerIndex*120,text:layer.text || '',ecommerceOutputId:output.id,ecommerceLayerType:layer.type || 'text'};
+            nodes.push(prompt);
+            group.items.push(prompt.id);
+        });
+        connections.push({id:uid('c'),from:agent.id,to:image.id});
+        applied.add(output.id);
+    });
+    agent.appliedOutputIds = [...applied];
+    group.h = Math.max(Number(group.h || 0),140+Math.ceil(group.items.length/3)*160);
+    render();
+    scheduleSave();
+}
+window.StudioEcommerceBridge = {
+    kind:'classic',
+    getCanvasId:() => canvas?.id || '',
+    getSelectedNodes:ecommerceClassicSelectedNodes,
+    ensureAgentNode:ensureClassicEcommerceAgent,
+    updateAgentNode:updateClassicEcommerceAgent,
+    applyRunResults:applyClassicEcommerceResults
+};
 function loopCount(node){
     return Math.max(1, Math.min(100, Number(node?.count || 1) || 1));
 }
@@ -13376,6 +13506,36 @@ function outputDownloadName(url){
     const ext = clean.includes('.') ? clean.split('.').pop() : 'png';
     return `canvas-output-${Date.now()}.${ext || 'png'}`;
 }
+function outputDragDownloadHref(url, filename='download') {
+    const raw = canvasOriginalMediaUrl(url);
+    if(!raw) return '';
+    const href = (raw.startsWith('data:') || raw.startsWith('blob:') || raw.startsWith('/api/download-output'))
+        ? raw
+        : `/api/download-output?url=${encodeURIComponent(raw)}&name=${encodeURIComponent(filename || outputDownloadName(raw))}`;
+    try { return new URL(href, window.location.href).href; } catch(_) { return href; }
+}
+function outputImageDragMime(filename='image.png', url='') {
+    const value = `${filename} ${url}`.toLowerCase();
+    if(/\.(jpe?g)(?:[?#\s]|$)/.test(value)) return 'image/jpeg';
+    if(/\.webp(?:[?#\s]|$)/.test(value)) return 'image/webp';
+    if(/\.gif(?:[?#\s]|$)/.test(value)) return 'image/gif';
+    if(/\.bmp(?:[?#\s]|$)/.test(value)) return 'image/bmp';
+    return 'image/png';
+}
+function bindOutputExternalImageDrag(img, url, filename='image.png') {
+    if(!img || !url) return;
+    const name = filename || outputDownloadName(url);
+    const href = outputDragDownloadHref(url, name);
+    img.draggable = true;
+    img.title = '拖到桌面或文件夹保存图片';
+    img.ondragstart = event => {
+        event.stopPropagation();
+        event.dataTransfer.effectAllowed = 'copy';
+        event.dataTransfer.setData('DownloadURL', `${outputImageDragMime(name, url)}:${name}:${href}`);
+        event.dataTransfer.setData('text/uri-list', href);
+        event.dataTransfer.setData('text/plain', href);
+    };
+}
 function isVideoUrl(url){
     const clean = canvasOriginalMediaUrl(url).split('?')[0].toLowerCase();
     return /\.(mp4|webm|mov|m4v|avi|mkv|flv)$/.test(clean);
@@ -14058,7 +14218,8 @@ function renderOutputMedia(item, useGridLayout=false){
         const label = kind === 'text' ? 'TEXT' : 'FILE';
         return `<div class="output-img-wrap output-file-wrap" data-output-url="${safe}"${gridStyle}><div class="output-file-card"><i data-lucide="${icon}" class="w-7 h-7"></i><span>${escapeHtml(meta.name || outputImageName(url))}</span><small>${label}</small></div>${timePill}<button class="output-del" title="${tr('common.delete')}">×</button></div>`;
     }
-    return `<div class="output-img-wrap" data-output-url="${safe}"${gridStyle}>${canvasPreviewImgHtml(url, useGridLayout ? 512 : 768, 'alt="generated output"')}${timePill}${costPill}<button class="output-del" title="${tr('common.delete')}">×</button></div>`;
+    const loadAttrs = meta.viewed ? 'alt="generated output"' : 'alt="generated output" loading="eager" fetchpriority="high"';
+    return `<div class="output-img-wrap" data-output-url="${safe}"${gridStyle}>${canvasPreviewImgHtml(url, 512, loadAttrs)}${timePill}${costPill}<button class="output-del" title="${tr('common.delete')}">×</button></div>`;
 }
 function outputGridLayout(node){
     const images = node?.images || [];
@@ -14849,6 +15010,9 @@ function openOutputLightbox(url, out){
     outputLightboxImg.src = canvasDisplayMediaUrl(url, outputDownloadName(url));
     outputCompareResult.src = canvasDisplayMediaUrl(url, outputDownloadName(url));
     outputCompareOriginal.src = currentOutputCompareUrl ? canvasDisplayMediaUrl(currentOutputCompareUrl, outputDownloadName(currentOutputCompareUrl)) : '';
+    bindOutputExternalImageDrag(outputLightboxImg, url, outputDownloadName(url));
+    bindOutputExternalImageDrag(outputCompareResult, url, outputDownloadName(url));
+    if(currentOutputCompareUrl) bindOutputExternalImageDrag(outputCompareOriginal, currentOutputCompareUrl, outputDownloadName(currentOutputCompareUrl));
     outputPreview.ondblclick = e => {
         e.stopPropagation();
         if(!currentOutputCompareUrl) return;
@@ -16358,6 +16522,3 @@ window.StudioCanvasTools = {
     save: () => saveCanvas(),
     reload: () => window.location.reload()
 };
-    bindOutputExternalImageDrag(outputLightboxImg, url, outputDownloadName(url));
-    bindOutputExternalImageDrag(outputCompareResult, url, outputDownloadName(url));
-    if(currentOutputCompareUrl) bindOutputExternalImageDrag(outputCompareOriginal, currentOutputCompareUrl, outputDownloadName(currentOutputCompareUrl));

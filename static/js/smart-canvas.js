@@ -157,6 +157,21 @@ let transientSmartCloudLinks = [];
 let runBtnCooldownToken = 0;
 let smartRunStateToken = 0;
 const activeSmartTaskPolls = new Map();
+let smartResultRenderFrame = 0;
+let smartResultSaveTimer = 0;
+function scheduleSmartResultCommit(){
+    if(!smartResultRenderFrame){
+        smartResultRenderFrame = requestAnimationFrame(() => {
+            smartResultRenderFrame = 0;
+            render();
+        });
+    }
+    if(smartResultSaveTimer) clearTimeout(smartResultSaveTimer);
+    smartResultSaveTimer = setTimeout(() => {
+        smartResultSaveTimer = 0;
+        scheduleSave();
+    }, 180);
+}
 const smartNodeRunTokens = new Map();
 let smartRhRandomValues = {};
 let lastImagePasteAt = 0;
@@ -486,15 +501,19 @@ function smartMediaPreviewUrl(itemOrUrl, size=512){
     const displayItem = typeof itemOrUrl === 'object' && itemOrUrl ? {...itemOrUrl, url:raw} : raw;
     const displayUrl = displayMediaUrl(displayItem);
     if(!raw || raw.startsWith('data:') || raw.startsWith('blob:')) return displayUrl;
-    if(!raw.startsWith('/output/') && !raw.startsWith('/assets/')) return displayUrl;
-    if(!/\.(png|jpe?g|webp|gif|bmp|avif|tiff?|mp4|webm|mov|m4v|avi|mkv)(\?|#|$)/i.test(raw)) return displayUrl;
+    const isRemote = /^https?:\/\//i.test(raw);
+    const isLocalMedia = raw.startsWith('/output/') || raw.startsWith('/assets/');
+    if(!isRemote && !isLocalMedia) return displayUrl;
+    if(!isRemote && !/\.(png|jpe?g|webp|gif|bmp|avif|tiff?)(\?|#|$)/i.test(raw)) return displayUrl;
     const width = Math.max(64, Math.min(2048, Math.round(Number(size) || 512)));
     return `/api/media-preview?w=${width}&url=${encodeURIComponent(raw)}`;
 }
 function smartPreviewImgHtml(itemOrUrl, size=512, attrs=''){
     const original = smartOriginalMediaUrl(itemOrUrl);
     const preview = smartMediaPreviewUrl(itemOrUrl, size);
-    return `<img src="${escapeHtml(preview)}" data-preview-src="${escapeAttr(preview)}" data-original-src="${escapeAttr(original)}"${attrs ? ` ${attrs}` : ''}>`;
+    const loading = /(?:^|\s)loading=/.test(attrs) ? '' : ' loading="lazy"';
+    const decoding = /(?:^|\s)decoding=/.test(attrs) ? '' : ' decoding="async"';
+    return `<img${loading}${decoding} src="${escapeHtml(preview)}" data-preview-src="${escapeAttr(preview)}" data-original-src="${escapeAttr(original)}"${attrs ? ` ${attrs}` : ''}>`;
 }
 function loadSmartOriginalImageDimensions(url){
     const src = displayMediaUrl({url:smartOriginalMediaUrl(url)});
@@ -582,8 +601,8 @@ function bindSmartPreviewImageFallbacks(root=document){
         });
     });
 }
-const SMART_SELECTED_HIGH_RES_DELAY = 320;
-const SMART_HIGH_RES_ZOOM_THRESHOLD = 0.86;
+const SMART_SELECTED_HIGH_RES_DELAY = 1200;
+const SMART_HIGH_RES_ZOOM_THRESHOLD = 1.25;
 let smartSelectedHighResTimer = 0;
 let smartSelectedHighResSeq = 0;
 let smartSelectedHighResNodeIds = new Set();
@@ -638,12 +657,14 @@ function smartImageNearViewport(img){
 function syncSmartSelectedImageResolution(root=null){
     const selectedImages = [];
     const wantHighRes = smartViewportWantsHighRes();
+    const selectedIds = new Set(selectedNodeIds());
     smartNodeElementsForHighResSync(root).forEach(scope => {
         scope.querySelectorAll?.('img[data-preview-src][data-original-src]').forEach(img => {
             if(img.dataset.previewKind === 'video') return;
             const preview = img.dataset.previewSrc || '';
             const original = img.dataset.originalSrc || '';
-            if(!wantHighRes || !smartImageNearViewport(img)){
+            const nodeId = img.closest('.image-node')?.dataset?.id || '';
+            if(!wantHighRes || !selectedIds.has(nodeId) || !smartImageNearViewport(img)){
                 delete img.dataset.selectedHighResTarget;
                 if(preview && img.getAttribute('src') !== preview) img.src = preview;
                 return;
@@ -666,7 +687,7 @@ function syncSmartSelectedImageResolution(root=null){
     smartSelectedHighResTimer = setTimeout(async () => {
         smartSelectedHighResTimer = 0;
         if(seq !== smartSelectedHighResSeq || smartImageEditorIsOpen()) return;
-        await Promise.all(selectedImages.map(item => preloadSmartSelectedHighRes(item.target)));
+        await Promise.all(selectedImages.slice(0, 2).map(item => preloadSmartSelectedHighRes(item.target)));
         if(seq !== smartSelectedHighResSeq || smartImageEditorIsOpen()) return;
         selectedImages.forEach(({img, target}) => {
             if(!img.isConnected || img.dataset.selectedHighResTarget !== target) return;
@@ -1909,6 +1930,7 @@ function smartGroupImageGridLayout(node){
     return {cols, rows, visibleRows, width, height, thumb:baseThumb};
 }
 function imageLayout(images, scale=1, node=null){
+    if(node?.type === 'smart-ecommerce-agent') return {cols:1,rows:1,width:Number(node.w)||360,height:Number(node.h)||250,thumb:96,single:true};
     if(node?.type === 'smart-group'){
         const groupThumbLayout = smartGroupThumbLayout(node);
         if(groupThumbLayout) return groupThumbLayout;
@@ -6322,7 +6344,29 @@ function createSmartGroupNode(x, y, options={}){
     scheduleSave();
     return node;
 }
+function createEcommerceAgentNode(x, y, options={}){
+    if(!options.skipUndo) pushUndo();
+    const node = {id:uid('ecommerce'), type:'smart-ecommerce-agent', x, y, w:360, h:250,
+        title:'画布 Agent', runId:'', status:'idle', currentStage:'等待选择素材',
+        progress:0, totalImages:0, successCount:0, failedCount:0, retryCount:0,
+        actualCost:null, appliedOutputIds:[], resultGroupId:'', created_at:Date.now()};
+    nodes.push(node);
+    if(options.select !== false) selectedId = node.id;
+    render(); scheduleSave(); return node;
+}
 function cloneSmartNode(node, dx=0, dy=0){
+    if(node?.type === 'smart-ecommerce-agent'){
+        const ecommerceCopy = JSON.parse(JSON.stringify(node));
+        ecommerceCopy.id = uid('ecommerce');
+        ecommerceCopy.x = (Number(node.x) || 0) + dx;
+        ecommerceCopy.y = (Number(node.y) || 0) + dy;
+        ecommerceCopy.runId = '';
+        ecommerceCopy.status = 'idle';
+        ecommerceCopy.currentStage = '等待选择素材';
+        ecommerceCopy.appliedOutputIds = [];
+        ecommerceCopy.resultGroupId = '';
+        return ecommerceCopy;
+    }
     const copy = JSON.parse(JSON.stringify(node));
     copy.id = uid(
         node.type === 'smart-prompt'
@@ -6873,7 +6917,8 @@ function singleMediaHtml(img, w, h){
     if(isFileMediaItem(img) || isTextMediaItem(img)) return `<div class="node-img media-card media-file-card" style="width:${w}px;height:${h}px"><div class="media-card-icon"><i data-lucide="${isTextMediaItem(img) ? 'file-text' : 'file'}"></i></div><div class="media-card-title">${escapeHtml(img.name || (isTextMediaItem(img) ? 'Text' : 'File'))}</div><div class="media-card-sub">${isTextMediaItem(img) ? 'TEXT' : 'FILE'}</div></div>`;
     if(isAudioMediaItem(img)) return `<div class="node-img media-card media-audio-card" style="width:${w}px;height:${h}px"><div class="media-card-icon"><i data-lucide="file-audio"></i></div><div class="media-card-title">${escapeHtml(img.name || 'Audio')}</div><div class="media-card-sub">AUDIO</div><audio src="${escapeAttr(img.url || '')}" data-url="${escapeAttr(img.url || '')}" controls preload="metadata"></audio></div>`;
     if(isVideoMediaItem(img)) return `<div class="node-img media-card media-video-card" style="width:${w}px;height:${h}px">${isInlineVideoActive(img) ? smartVideoPlayerHtml(img.url || '') : `${smartVideoPreviewHtml(img, 768, 'alt=""')}<button class="smart-video-play" type="button" title="播放"><i data-lucide="play"></i></button>`}</div>`;
-    return smartPreviewImgHtml(img, 768, `class="node-img" draggable="false" style="width:${w}px;height:${h}px"`);
+    const priority = img?.generatedResult ? ' loading="eager" fetchpriority="high"' : '';
+    return smartPreviewImgHtml(img, 512, `class="node-img" draggable="false" style="width:${w}px;height:${h}px"${priority}`);
 }
 function smartNodeHasLiveMedia(node){
     return Boolean(node?.type === 'smart-minimax' || (!node?.pending && (node?.images || []).some(img => img?.url)));
@@ -7041,6 +7086,43 @@ function downloadNameForMediaItem(item, fallbackPrefix='canvas-output'){
     let name = safeExportFileName(preferred || randomName, randomName);
     if(!/\.[a-z0-9]{2,8}$/i.test(name)) name += ext;
     return name;
+}
+function smartImageDragMime(filename='image.png', url='') {
+    const value = `${filename} ${url}`.toLowerCase();
+    if(/\.(jpe?g)(?:[?#\s]|$)/.test(value)) return 'image/jpeg';
+    if(/\.webp(?:[?#\s]|$)/.test(value)) return 'image/webp';
+    if(/\.gif(?:[?#\s]|$)/.test(value)) return 'image/gif';
+    if(/\.bmp(?:[?#\s]|$)/.test(value)) return 'image/bmp';
+    return 'image/png';
+}
+function smartDragDownloadHref(item, filename='image.png') {
+    const raw = smartOriginalMediaUrl(item?.url || item);
+    if(!raw) return '';
+    const href = (raw.startsWith('data:') || raw.startsWith('blob:') || raw.startsWith('/api/download-output'))
+        ? raw
+        : `/api/download-output?url=${encodeURIComponent(raw)}&name=${encodeURIComponent(filename || downloadNameForMediaItem({url:raw}, 'image'))}`;
+    try { return new URL(href, window.location.href).href; } catch(_) { return href; }
+}
+function bindSmartExternalImageDrag(img, item, fallbackPrefix='image') {
+    if(!img || !item?.url) return;
+    const name = downloadNameForMediaItem(item, fallbackPrefix);
+    const href = smartDragDownloadHref(item, name);
+    img.draggable = true;
+    img.title = '拖到桌面或文件夹保存图片';
+    img.ondragstart = event => {
+        event.stopPropagation();
+        event.dataTransfer.effectAllowed = 'copy';
+        event.dataTransfer.setData('DownloadURL', `${smartImageDragMime(name, item.url)}:${name}:${href}`);
+        event.dataTransfer.setData('text/uri-list', href);
+        event.dataTransfer.setData('text/plain', href);
+    };
+}
+function bindSmartPreviewDrag(img, item, fallbackPrefix='image') {
+    if(!img || !item?.url) return;
+    bindSmartExternalImageDrag(img, item, fallbackPrefix);
+    img.style.webkitUserDrag = 'element';
+    img.style.userSelect = 'none';
+    img.style.cursor = 'grab';
 }
 function downloadPreviewImage(){
     const node = nodes.find(n => n.id === previewNavState.nodeId);
@@ -8348,6 +8430,16 @@ function smartMinimaxBodyHtml(node){
 }
 
 function nodeBodyHtml(node, layout){
+    if(node.type === 'smart-ecommerce-agent') {
+        const status = {idle:'等待资料',queued:'排队中',planning:'规划内容',generating:'生成图片',paused:'已暂停',succeeded:'已完成',partial:'部分完成',failed:'失败',cancelled:'已取消'}[node.status] || node.status || '等待资料';
+        const cost = node.actualCost == null ? '上游未提供' : '¥' + Number(node.actualCost || 0).toFixed(4);
+        return '<div class="ec-node-body"><div class="ec-node-stage">' + escapeHtml(node.currentStage || status)
+            + '</div><div class="ec-progress" style="--progress:' + Number(node.progress || 0) + '%"><i></i></div>'
+            + '<div class="ec-node-line"><span>' + escapeHtml(status) + '</span><b>' + Number(node.successCount || 0) + ' / ' + Number(node.totalImages || 0) + ' 张</b></div>'
+            + '<div class="ec-node-line"><span>失败 / 重做</span><b>' + Number(node.failedCount || 0) + ' / ' + Number(node.retryCount || 0) + '</b></div>'
+            + '<div class="ec-node-line"><span>实际费用</span><b>' + escapeHtml(cost) + '</b></div>'
+            + '<button class="ec-node-open" type="button" data-ecommerce-agent-open>打开画布 Agent</button></div>';
+    }
     if(node.type === 'smart-minimax') return smartMinimaxBodyHtml(node);
     if(node.type === 'smart-group') return smartGroupBodyHtml(node);
     if(node.type === 'smart-prompt') return promptNodeBodyHtml(node);
@@ -8672,7 +8764,7 @@ function render(){
         .sort((a, b) => (isSmartGroupNode(a) ? 0 : 1) - (isSmartGroupNode(b) ? 0 : 1))
         .map(node => {
         const imgs = node.images || [];
-        const title = node.type === 'smart-group' ? (node.title === '万能分组' ? '智能分组' : (node.title || '智能分组')) : node.type === 'smart-prompt' ? 'Prompt' : node.type === 'smart-loop' ? 'Loop' : node.type === 'smart-minimax' ? 'MiniMax H3' : (imgs.length > 1 ? 'Group' : imgs.length ? 'Image' : escapeHtml(tr('smart.createImportNode')));
+        const title = node.type === 'smart-group' ? (node.title === '万能分组' ? '智能分组' : (node.title || '智能分组')) : node.type === 'smart-prompt' ? 'Prompt' : node.type === 'smart-loop' ? 'Loop' : node.type === 'smart-minimax' ? 'MiniMax H3' : node.type === 'smart-ecommerce-agent' ? '画布 Agent' : (imgs.length > 1 ? 'Group' : imgs.length ? 'Image' : escapeHtml(tr('smart.createImportNode')));
         const scale = nodeScale(node);
         const layout = imageLayout(imgs, scale, node);
         const isPrompt = node.type === 'smart-prompt';
@@ -8796,28 +8888,8 @@ function measureSmartNodeImages(){
         if(!node || !image || image.natural_w || image.natural_h) return;
         const isPreview = isSmartPreviewImage(imgEl);
         const originalSrc = imgEl.dataset?.originalSrc || image.url || '';
-        if(isPreview && imgEl.dataset?.previewKind !== 'video' && originalSrc && !image._naturalSizeLoading){
-            image._naturalSizeLoading = true;
-            loadSmartOriginalImageDimensions(originalSrc).then(size => {
-                image._naturalSizeLoading = false;
-                if(!size || image.natural_w || image.natural_h) return;
-                image.natural_w = size.w;
-                image.natural_h = size.h;
-                delete image.layout_w;
-                delete image.layout_h;
-                applyThumbDisplaySizeToElement(itemEl, image, Math.max(itemEl?.clientWidth || 0, itemEl?.clientHeight || 0));
-                updateImageResolutionBadgeElement(itemEl, image);
-                if(!isSmartGroupNode(node) && (node.images || []).length === 1 && !node.w && !node.h){
-                    const layout = singleImageLayout(image, node, mediaNodeDefaultScale(node));
-                    node.w = layout.width;
-                    node.h = layout.height;
-                }
-                updateNodeElementDuringResize(node);
-                if(containerNode && containerNode.id !== node.id) updateNodeElementDuringResize(containerNode);
-                if(isNodeSelected(node.id)) updateComposer();
-                scheduleSave();
-            });
-        }
+        // Preview images preserve the source aspect ratio. Measuring the
+        // preview avoids decoding a second full-size 2K/4K image immediately.
         if(isPreview && image.layout_w && image.layout_h) return;
         const apply = () => {
             const w = imgEl.naturalWidth || imgEl.videoWidth || 0;
@@ -9877,6 +9949,7 @@ function bindNodeEvents(){
     world.querySelectorAll('.image-node').forEach(el => {
         const id = el.dataset.id;
         const nodeForControls = nodes.find(n => n.id === id);
+        if(nodeForControls?.type === 'smart-ecommerce-agent') el.classList.add('ecommerce-agent-smart-node');
         if(nodeForControls?.type === 'smart-prompt') bindPromptNodeControls(el, nodeForControls);
         if(nodeForControls?.type === 'smart-loop') bindLoopNodeControls(el, nodeForControls);
         if(nodeForControls?.type === 'smart-minimax') bindMinimaxNodeControls(el, nodeForControls);
@@ -11459,6 +11532,7 @@ function refreshComparePanel(){
         currentVideo.style.display = 'none';
     }
     currentImg.style.display = 'block';
+    bindSmartPreviewDrag(currentImg, editing.image, 'image');
     currentImg.onload = onCurrentLoaded;
     currentImg.onerror = () => {
         if(currentImg.dataset.proxyFallbackTried === '1') return;
@@ -12715,8 +12789,15 @@ function openImageEditor(nodeId, imageIndex=0){
         syncImageEditOverflow(); refreshIcons();
     };
     img.onerror = () => {
-        if(editorFallbackIndex >= editorFallbackUrls.length) return;
-        img.src = editorFallbackUrls[editorFallbackIndex++];
+        if(img.dataset.editorQuick === '1'){
+            if(editorFallbackIndex < editorFallbackUrls.length) img.src = editorFallbackUrls[editorFallbackIndex++];
+            return;
+        }
+        // 高清图失败时保留已经显示的快速预览，不让弹窗退回白屏。
+        if(quickEditorSrc && img.getAttribute('src') !== quickEditorSrc){
+            img.dataset.editorQuick = '1';
+            img.src = quickEditorSrc;
+        }
     };
     // 不设 crossOrigin：displayMediaUrl 已把所有地址收敛为同源（http 走本地代理），同源图片不会污染画布，
     // 裁剪/涂抹等导出操作照常可用。而带 crossOrigin 会让浏览器对“缩略图已无 CORS 缓存的同源图”重新发起
@@ -12726,8 +12807,16 @@ function openImageEditor(nodeId, imageIndex=0){
     const loadFullEditorImage = () => {
         if(!cropState || cropState.nodeId !== nodeId || cropState.imageIndex !== imageIndex) return;
         if(!imageEditModal.classList.contains('open') || img.dataset.editorSrcToken !== editorSrcToken) return;
-        img.dataset.editorQuick = '';
-        if(img.getAttribute('src') !== primaryEditorSrc) img.src = primaryEditorSrc;
+        if(!primaryEditorSrc || img.getAttribute('src') === primaryEditorSrc) return;
+        // 先在后台预加载高清图，只有加载成功后才替换当前可见的快速预览。
+        const full = new Image();
+        full.onload = () => {
+            if(!imageEditModal.classList.contains('open') || img.dataset.editorSrcToken !== editorSrcToken) return;
+            img.dataset.editorQuick = '';
+            img.src = primaryEditorSrc;
+        };
+        full.onerror = () => {};
+        full.src = primaryEditorSrc;
     };
     if(quickEditorSrc && quickEditorSrc !== primaryEditorSrc){
         img.dataset.editorQuick = '1';
@@ -17475,8 +17564,7 @@ async function resumeSmartPendingNode(node, logContext={}){
         try {
             const result = await pollSmartCanvasTask(task.taskId);
             finalizeSmartPendingTask(node, task.taskId, resultMediaUrls(result?.image_items?.length ? result.image_items : (result?.images?.length ? result.images : result)), task.kind || 'image', result?.generation_cost, result?.generation_cost_status || '');
-            render();
-            scheduleSave();
+            scheduleSmartResultCommit();
         } catch(e) {
             if(e && e.jimengPending && e.submitId){
                 node.pendingTasks = smartPendingTasks(node).filter(item => item.taskId !== task.taskId);
@@ -17768,6 +17856,7 @@ function createNodeFromMenu(type){
     if(type === 'prompt') created = createPromptNode(p.x - 158, p.y - 97);
     else if(type === 'loop') created = createLoopNode(p.x - 135, p.y - 95);
     else if(type === 'minimax') created = createMinimaxNode(p.x - 520, p.y - 320);
+    else if(type === 'ecommerce-agent') created = createEcommerceAgentNode(p.x - 180, p.y - 125);
     else created = createImageNodeAt(p);
     createMenuGroupId = groupId;
     addCreatedNodeToMenuGroup(created);
@@ -19284,6 +19373,74 @@ window.onload = async () => {
     syncApiKindToggleVisibility();
     render();
 };
+function ecommerceSmartSnapshot(node){
+    return {id:node.id,type:node.type,title:node.title || '',name:node.name || '',text:node.text || '',
+        url:node.url || '',images:(node.images || []).filter(item => item?.url).slice(0,20).map(item => ({url:item.url,name:item.name || ''}))};
+}
+function ecommerceSmartSelectedNodes(){
+    const result=[], seen=new Set();
+    const include = node => {
+        if(!node || seen.has(node.id) || node.type === 'smart-ecommerce-agent') return;
+        seen.add(node.id);
+        if(isSmartGroupNode(node)){
+            if((node.images || []).some(item => item?.url)) result.push(ecommerceSmartSnapshot(node));
+            smartGroupMembers(node).forEach(include);
+            return;
+        }
+        result.push(ecommerceSmartSnapshot(node));
+    };
+    selectedNodeIds().forEach(id => include(nodes.find(node => node.id === id)));
+    return result;
+}
+function ecommerceSmartAgent(run=null){
+    return nodes.find(node => node.type === 'smart-ecommerce-agent' && run?.node_id && node.id === run.node_id)
+        || nodes.find(node => node.type === 'smart-ecommerce-agent' && run?.id && node.runId === run.id)
+        || nodes.find(node => node.type === 'smart-ecommerce-agent');
+}
+function ensureSmartEcommerceAgent(){
+    const center = viewportCenter();
+    return ecommerceSmartAgent() || createEcommerceAgentNode(center.x - 180, center.y - 125);
+}
+function updateSmartEcommerceAgent(run){
+    const node = ecommerceSmartAgent(run) || ensureSmartEcommerceAgent();
+    const next={runId:run.id,status:run.status,currentStage:run.current_stage || '',progress:Number(run.progress || 0),
+        totalImages:Number(run.total_images || 0),successCount:Number(run.success_count || 0),failedCount:Number(run.failed_count || 0),
+        retryCount:Number(run.retry_count || 0),actualCost:run.actual_cost};
+    const changed=Object.keys(next).some(key => node[key] !== next[key]);
+    if(!changed) return node;
+    Object.assign(node,next);
+    render(); scheduleSave(); return node;
+}
+function applySmartEcommerceResults(run){
+    if(run.dry_run) return;
+    const agent=ecommerceSmartAgent(run) || ensureSmartEcommerceAgent();
+    const applied=new Set(agent.appliedOutputIds || []);
+    const fresh=(run.outputs || []).filter(item => item.status === 'succeeded' && item.url && !applied.has(item.id));
+    if(!fresh.length) return;
+    let group=nodes.find(node => node.id === agent.resultGroupId && isSmartGroupNode(node));
+    if(!group){
+        group={id:uid('group'),type:'smart-group',x:Number(agent.x || 0)+430,y:Number(agent.y || 0)-40,w:480,h:420,
+            title:'Agent 结果 · '+(run.product_profile?.name || '未命名素材'),items:[],images:[],created_at:Date.now(),ecommerceRunId:run.id};
+        nodes.push(group); agent.resultGroupId=group.id;
+        if(canvas) canvas.connections=[...(canvas.connections || []),{id:uid('conn'),from:agent.id,to:group.id,kind:'flow'}];
+    }
+    fresh.forEach(output => {
+        group.images.push({url:output.url,name:(output.plan?.platform_label || '')+' · '+(output.plan?.purpose || '结果'),
+            ecommerceOutputId:output.id,ecommerceRunId:run.id,generation_cost:output.cost || null,quality_status:output.quality_status || 'needs_review'});
+        (output.text_layers || []).forEach(layer => {
+            const prompt={id:uid('prompt'),type:'smart-prompt',x:group.x+40,y:group.y+80+(group.items.length*86),w:316,h:100,
+                title:layer.type === 'title' ? '标题文字层' : '卖点文字层',text:layer.text || '',promptSeparator:';',promptSplitEnabled:false,
+                llmEnabled:false,created_at:Date.now(),ecommerceOutputId:output.id,ecommerceLayerType:layer.type || 'text'};
+            nodes.push(prompt); group.items.push(prompt.id);
+        });
+        applied.add(output.id);
+    });
+    agent.appliedOutputIds=[...applied];
+    delete group.w; delete group.h;
+    render(); scheduleSave();
+}
+window.StudioEcommerceBridge={kind:'smart',getCanvasId:() => canvasId || '',getSelectedNodes:ecommerceSmartSelectedNodes,
+    ensureAgentNode:ensureSmartEcommerceAgent,updateAgentNode:updateSmartEcommerceAgent,applyRunResults:applySmartEcommerceResults};
 window.StudioCanvasTools = {
     kind:'smart',
     getCanvasId: () => canvasId || '',
@@ -19294,4 +19451,3 @@ window.StudioCanvasTools = {
     save: () => saveCanvas(),
     reload: () => window.location.reload()
 };
-    bindSmartPreviewDrag(currentImg, editing.image, 'image');
