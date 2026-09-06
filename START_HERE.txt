@@ -1,7 +1,7 @@
 Xiaoqi AI Canvas Share Package
 
 1. Unzip this package to any folder.
-2. Double-click `run.bat`.
+2. Double-click `xiaoqi-ai-canvas.exe` to start; if Windows blocks the EXE, double-click `run.bat` instead.
 3. If the browser does not open automatically, use the exact address shown in the server window (for example `http://127.0.0.1:3012/`).
 
 Notes:

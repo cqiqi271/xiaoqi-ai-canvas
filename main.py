@@ -2022,6 +2022,7 @@ def update_allowed_file(path: str) -> bool:
         return False
     update_root_files = {
         "main.py", "ecommerce_agent.py", "VERSION", "project-config.json",
+        "xiaoqi-ai-canvas.exe", "xiaoqi_launcher.py", "build_launcher.ps1",
         "launcher.py", "run.bat", "start-server.bat",
         "server-console.bat", "wait-for-server.ps1",
         "find-free-port.ps1", "update.bat",

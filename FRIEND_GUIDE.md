@@ -1,11 +1,11 @@
 # Quick Start for Friends
 
 1. Unzip the `xiaoqi-canvas-share-*.zip` package anywhere on Windows.
-2. Double-click `run.bat`.
+2. Double-click `xiaoqi-ai-canvas.exe` to start. If Windows blocks the EXE, double-click `run.bat` instead.
 3. The app will print the exact port it picked and open the browser.
 
 If it does not start:
-- Make sure the `python/` folder is still next to `run.bat`.
+- Make sure the `python/` folder is still next to the EXE and `run.bat`.
 - Check the separate server window for the exact error.
 - If you want online AI features, open API Settings in the app and configure your own API key.
 - If another local project uses the default port, this app automatically selects the next available port.
