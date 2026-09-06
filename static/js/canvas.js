@@ -6695,7 +6695,7 @@ function applyClassicEcommerceResults(run){
     fresh.forEach((output,index) => {
         const column = index % 3;
         const row = Math.floor(index / 3);
-        const image = {id:uid('img'),type:'image',x:group.x+30+column*290,y:group.y+70+row*390,url:output.url,name:(output.plan?.platform_label || '')+' · '+(output.plan?.purpose || '结果'),ecommerceOutputId:output.id,ecommerceRunId:run.id,generation_cost:output.cost || null,quality_status:output.quality_status || 'needs_review'};
+        const image = {id:uid('img'),type:'image',x:group.x+30+column*290,y:group.y+70+row*390,url:output.url,name:(output.plan?.platform_label || '')+' · '+(output.plan?.purpose || '结果'),mediaKind:output.media_kind || output.plan?.media_kind || 'image',ecommerceOutputId:output.id,ecommerceRunId:run.id,generation_cost:output.cost || null,quality_status:output.quality_status || 'needs_review'};
         nodes.push(image);
         group.items.push(image.id);
         (output.text_layers || []).forEach((layer,layerIndex) => {

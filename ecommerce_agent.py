@@ -125,6 +125,11 @@ DETAIL_TEMPLATE_MAP = {item["id"]: item for item in DETAIL_TEMPLATES}
 TASK_DONE = {"succeeded", "failed", "cancelled"}
 RUN_DONE = {"succeeded", "partial", "failed", "cancelled"}
 RISK_WORDS = ("治疗", "治愈", "减肥", "根治", "百分百", "100%", "绝对", "最强", "第一", "永久")
+OUTPUT_KIND_INFO = {
+    "detail": {"label": "详情页", "template_id": "basic-detail", "default_count": 6},
+    "main": {"label": "商品主图", "template_id": "", "default_count": 6},
+    "video": {"label": "商品视频", "template_id": "", "default_count": 1},
+}
 CREATIVE_ACTIONS = {
     "create": "根据选中的素材生成新的创作方案",
     "variation": "保留主体与核心构图，生成一组有变化的方案",
@@ -152,6 +157,7 @@ class BrandPayload(BaseModel):
 class ParsePayload(BaseModel):
     request_text: str = ""
     platforms: List[str] = []
+    output_kind: str = "auto"
 
 
 class AnalyzePayload(BaseModel):
@@ -189,15 +195,44 @@ class RunPayload(BaseModel):
     template_name: str = ""
     detail_modules: List[Dict[str, Any]] = []
     template_version: str = "1"
+    output_kind: str = "auto"
+    video_duration: int = 5
+    aspect_ratio: str = "16:9"
+    resolution: str = ""
 
 
-def parse_quantity(text: str, platforms=None) -> Dict[str, Any]:
+def normalize_output_kind(value: str) -> str:
+    value = str(value or "").strip().lower()
+    return value if value in OUTPUT_KIND_INFO else "auto"
+
+
+def detect_output_kind(text: str, requested: str = "auto") -> Dict[str, Any]:
+    requested = normalize_output_kind(requested)
+    if requested != "auto":
+        return {"kind": requested, **OUTPUT_KIND_INFO[requested], "source": "manual"}
     text = str(text or "").strip()
+    # 明确写出视频时优先走视频接口，避免“视频主图”被当成图片任务。
+    if re.search(r"视频|短视频|宣传片|广告片|商品片", text, re.I):
+        kind = "video"
+    elif re.search(r"详情页|详情图|详情页面|详情", text, re.I):
+        kind = "detail"
+    elif re.search(r"主图|白底图|商品图|产品图|电商图|套图", text, re.I):
+        kind = "main"
+    else:
+        kind = "main"
+    return {"kind": kind, **OUTPUT_KIND_INFO[kind], "source": "text"}
+
+
+def parse_quantity(text: str, platforms=None, output_kind: str = "auto") -> Dict[str, Any]:
+    text = str(text or "").strip()
+    output = detect_output_kind(text, output_kind)
+    kind = output["kind"]
     warnings = []
     explicit = re.search(r"总(?:共|计)?\s*(\d+)\s*张", text)
     page_each = re.search(r"(\d+)\s*页[^\d]{0,12}(?:每页|一页)\s*(\d+)\s*张", text)
     page = re.search(r"(\d+)\s*页", text)
     images = re.search(r"(?:生成|制作|做|要)?\s*(\d+)\s*张", text)
+    videos = re.search(r"(?:生成|制作|做|要)?\s*(\d+)\s*(?:条|个)\s*视频", text)
     pages = int(page_each.group(1)) if page_each else (int(page.group(1)) if page else 0)
     each = int(page_each.group(2)) if page_each else 0
     calculated = pages * each if pages and each else 0
@@ -209,12 +244,15 @@ def parse_quantity(text: str, platforms=None) -> Dict[str, Any]:
         total, source = calculated, "pages_times_each"
     elif pages:
         total, each, source = pages, 1, "pages"
+    elif videos and kind == "video":
+        total, source = int(videos.group(1)), "videos"
     elif images:
         total, source = int(images.group(1)), "images"
     else:
-        total = max(6, min(12, 6 + max(0, len(platforms or []) - 1) * 2))
+        total = int(output["default_count"])
         source = "automatic"
-        warnings.append(f"没有写明数量，已自动规划 {total} 张")
+        unit = "条" if kind == "video" else "张"
+        warnings.append(f"没有写明数量，已自动规划 {total} {unit}")
     if total > 200:
         total = 200
         warnings.append("单次最多规划 200 张，已按 200 张处理")
@@ -225,6 +263,7 @@ def parse_quantity(text: str, platforms=None) -> Dict[str, Any]:
         "page_count": pages, "images_per_page": each, "total_images": total,
         "quantity_source": source, "warnings": warnings,
         "batches": [min(20, total - start) for start in range(0, total, 20)],
+        "output_kind": kind, "output_label": output["label"],
     }
 
 
@@ -314,6 +353,13 @@ def _detail_plan(snapshot, request_text="", template_id="basic-detail", module_i
             "index": index + 1, "page": index + 1, "module_id": module["id"],
             "module_name": module["name"], "purpose": module["purpose"],
             "kind": module["kind"], "text_hint": module["text_hint"],
+            "prompt": (
+                f"为选中的商品制作“{module['name']}”详情页模块，目标是{module['purpose']}。"
+                f"画面类型：{module['kind']}；建议文字：{module['text_hint']}。"
+                + (f"本次创作要求：{str(request_text).strip()}。" if str(request_text).strip() else "")
+                + "严格保持商品外观、Logo、包装文字、颜色、比例、结构和数量不变，"
+                + "只生成干净背景、合理场景、自然光影和清晰留白，不直接生成中文、价格或水印。"
+            ),
         })
     return {
         "template_id": template["id"], "template_name": template["name"],
@@ -341,6 +387,7 @@ def _plans(run):
     for index in range(run["total_images"]):
         platform = run["platforms"][index % len(run["platforms"])]
         spec, purpose = PLATFORMS[platform], purposes[index % len(purposes)]
+        media_kind = "video" if run.get("output_kind") == "video" else "image"
         page = min(run["page_count"], index // max(1, run["images_per_page"]) + 1)
         module = detail_modules[index % len(detail_modules)] if detail_modules else {}
         module_name = module.get("module_name") or ""
@@ -349,6 +396,11 @@ def _plans(run):
         prompt = (
             f"在无限画布中为{name}进行{action_note}，当前方向是{purpose}。{spec['focus']}。{brand_note}"
             + (f"这是详情页的“{module_name}”模块，目标是{module_purpose}。" if module_name else "")
+            + (
+                f"请制作一条约{run.get('video_duration') or 5}秒的商品展示短视频，"
+                f"画面比例为{run.get('aspect_ratio') or '16:9'}，镜头平稳，主体始终清楚可见。"
+                if media_kind == "video" else ""
+            )
             + "严格保留参考商品的Logo、包装文字、颜色、比例、结构和数量，不重画有文字的包装正面，"
             "不得虚构配件。只生成干净背景、场景和自然光影，不生成中文、价格或水印，"
             "为后续继续编辑保留清晰留白。主体清晰，边缘自然，画面有商业创作质感。"
@@ -361,13 +413,36 @@ def _plans(run):
             "title": f"{name} · {module_name or purpose}", "subtitle": module_purpose or spec["focus"],
             "module_id": module.get("module_id") or "", "module_name": module_name,
             "module_kind": module.get("kind") or "", "text_hint": module.get("text_hint") or "",
+            "media_kind": media_kind,
         })
     return result
 
 
 def register_ecommerce_agent(app, *, base_dir, submit_image_task, get_image_task,
-                              cancel_image_task, public_providers, estimate_cost=None):
-    root = Path(base_dir) / "data" / "ecommerce"
+                              cancel_image_task, public_providers, estimate_cost=None,
+                              submit_video_task=None):
+    def choose_state_root():
+        """Prefer the project data directory, but keep first-run Agent usable in a read-only folder."""
+        preferred = Path(base_dir) / "data" / "ecommerce"
+        candidates = [preferred]
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            candidates.append(Path(local_app_data) / "XiaoQiAI" / "data" / "ecommerce")
+        else:
+            candidates.append(Path.home() / "XiaoQiAI" / "data" / "ecommerce")
+        last_error = None
+        for candidate in candidates:
+            try:
+                candidate.mkdir(parents=True, exist_ok=True)
+                probe = candidate / f".write-check-{uuid.uuid4().hex}"
+                probe.write_text("ok", encoding="utf-8")
+                probe.unlink(missing_ok=True)
+                return candidate
+            except Exception as exc:
+                last_error = exc
+        raise RuntimeError(f"画布 Agent 数据目录不可写，请把项目解压到有写入权限的文件夹：{last_error}")
+
+    root = choose_state_root()
     brand_dir, product_dir = root / "brands", root / "products"
     run_dir, export_dir = root / "runs", root / "exports"
     for path in (brand_dir, product_dir, run_dir, export_dir):
@@ -452,11 +527,20 @@ def register_ecommerce_agent(app, *, base_dir, submit_image_task, get_image_task
                 return cost
         return {}
 
-    async def wait_task(task_id):
+    async def wait_task(task_id, timeout_seconds=1800):
+        deadline = time.monotonic() + max(60, int(timeout_seconds or 1800))
         while True:
             task = get_image_task(task_id) or {}
+            if not task:
+                raise RuntimeError("图片任务状态无法读取，可能服务刚刚重启。为避免重复扣费，请检查任务记录后再重试。")
             if task.get("status") in TASK_DONE:
                 return task
+            if time.monotonic() >= deadline:
+                try:
+                    cancel_image_task(task_id)
+                except Exception:
+                    pass
+                raise RuntimeError("图片生成等待超时，任务已停止等待。请查看任务中心，确认上游没有继续生成后再重试。")
             await asyncio.sleep(0.45)
 
     async def execute_output(run_id, output_id):
@@ -481,9 +565,37 @@ def register_ecommerce_agent(app, *, base_dir, submit_image_task, get_image_task
                     for i, url in enumerate(run["product_profile"]["reference_images"])]
             run, output = await mutate_run(
                 run_id, output_id, {"status": "queued", "started_at": time.time(), "error": ""},
-                {"status": "generating", "current_stage": f"生成图片 {plan['index']}/{run['total_images']}"},
+                {"status": "generating", "current_stage": ("生成视频" if plan.get("media_kind") == "video" else "生成图片") + f" {plan['index']}/{run['total_images']}"},
             )
             try:
+                if plan.get("media_kind") == "video":
+                    if not submit_video_task:
+                        raise RuntimeError("当前分享包未包含视频 Agent 组件，请重新制作完整分享包")
+                    submitted = await submit_video_task({
+                        "prompt": plan["prompt"], "provider_id": run["provider_id"],
+                        "model": run["model"], "duration": run.get("video_duration") or 5,
+                        "aspect_ratio": run.get("aspect_ratio") or "16:9",
+                        "resolution": run.get("resolution") or "",
+                        "images": refs, "enhance_prompt": False,
+                        "enable_upsample": False, "watermark": False,
+                        "generate_audio": False, "multimodal": False,
+                    })
+                    urls = (submitted.get("videos") or submitted.get("video_urls")
+                            or submitted.get("urls") or submitted.get("video") or [])
+                    if isinstance(urls, str):
+                        urls = [urls]
+                    if not urls:
+                        raise RuntimeError("上游视频任务完成但没有返回视频")
+                    cost = result_cost({"result": submitted})
+                    await mutate_run(run_id, output_id, {
+                        "status": "succeeded", "url": urls[0], "urls": urls,
+                        "media_kind": "video", "upstream_task_id": submitted.get("task_id") or submitted.get("request_id") or "",
+                        "cost": cost, "cost_status": submitted.get("generation_cost_status") or {},
+                        "quality_status": "needs_review",
+                        "quality_checks": {"video_returned": True, "duration_requested": run.get("video_duration") or 5},
+                        "completed_at": time.time(), "error": "",
+                    })
+                    return
                 submitted = await submit_image_task({
                     "prompt": plan["prompt"], "provider_id": run["provider_id"], "model": run["model"],
                     "size": plan["size"], "quality": run.get("quality") or "auto", "n": 1,
@@ -501,6 +613,7 @@ def register_ecommerce_agent(app, *, base_dir, submit_image_task, get_image_task
                     raise RuntimeError("上游任务完成但没有返回图片")
                 await mutate_run(run_id, output_id, {
                     "status": "succeeded", "url": urls[0], "image_items": result.get("image_items") or [],
+                    "media_kind": "image",
                     "upstream_task_id": result.get("task_id") or result.get("request_id") or "",
                     "cost": result_cost(task), "cost_status": result.get("generation_cost_status") or {},
                     "quality_status": "needs_review",
@@ -536,11 +649,14 @@ def register_ecommerce_agent(app, *, base_dir, submit_image_task, get_image_task
                 return
             run.update({"status": "planning", "current_stage": "规划创作内容与生成批次", "progress": 3.0})
             save(run)
-            for start in range(0, len(run["outputs"]), 20):
+            # Images enter the existing task-center queue in batches of 20. Video calls are synchronous
+            # in the current provider adapters, so keep their Agent concurrency deliberately small.
+            batch_size = 2 if run.get("output_kind") == "video" else 20
+            for start in range(0, len(run["outputs"]), batch_size):
                 run = load_run(run_id)
                 if run.get("cancel_requested"):
                     break
-                batch = [item for item in run["outputs"][start:start + 20] if item.get("status") in {"waiting", "retrying"}]
+                batch = [item for item in run["outputs"][start:start + batch_size] if item.get("status") in {"waiting", "retrying"}]
                 await asyncio.gather(*(execute_output(run_id, item["id"]) for item in batch))
                 run = load_run(run_id)
                 summarize(run)
@@ -584,6 +700,34 @@ def register_ecommerce_agent(app, *, base_dir, submit_image_task, get_image_task
         return {"platforms": [{"id": "canvas", **PLATFORMS["canvas"]}],
                 "providers": public_providers()}
 
+    @app.get("/api/ecommerce-agent/health")
+    async def health_api():
+        """A no-secret diagnostic endpoint used by the launcher and the Agent panel."""
+        try:
+            providers = public_providers()
+        except Exception as exc:
+            return {
+                "ok": False,
+                "storage_ok": root.exists(),
+                "storage_root": str(root),
+                "provider_count": 0,
+                "image_provider_count": 0,
+                "video_provider_count": 0,
+                "message": f"API 配置读取失败：{exc}",
+            }
+        image_providers = [item for item in providers if item.get("enabled", True) and item.get("image_models")]
+        video_providers = [item for item in providers if item.get("enabled", True) and item.get("video_models")]
+        return {
+            "ok": True,
+            "storage_ok": root.exists(),
+            "storage_root": str(root),
+            "provider_count": len(providers),
+            "image_provider_count": len(image_providers),
+            "video_provider_count": len(video_providers),
+            "feature_flags": {"detail": True, "main": True, "video": bool(submit_video_task)},
+            "message": "画布 Agent 已就绪",
+        }
+
     @app.get("/api/ecommerce-agent/brands")
     async def brands_api():
         rows = [read(path, {}) for path in brand_dir.glob("*.json")]
@@ -617,7 +761,9 @@ def register_ecommerce_agent(app, *, base_dir, submit_image_task, get_image_task
     @app.post("/api/ecommerce-agent/parse-request")
     async def parse_api(payload: ParsePayload):
         selected = [item for item in payload.platforms if item in PLATFORMS] or ["canvas"]
-        return {"quantity": parse_quantity(payload.request_text, selected),
+        quantity = parse_quantity(payload.request_text, selected, payload.output_kind)
+        detected = detect_output_kind(payload.request_text, payload.output_kind)
+        return {"quantity": quantity, "output": detected,
                 "platforms": [{"id": item, **PLATFORMS[item]} for item in selected]}
 
     @app.post("/api/ecommerce-agent/analyze")
@@ -652,13 +798,21 @@ def register_ecommerce_agent(app, *, base_dir, submit_image_task, get_image_task
         product = _product(snapshot)
         if not product["reference_images"]:
             raise HTTPException(status_code=400, detail="选中的节点里没有商品图片，请至少选择一张商品图")
+        detected = detect_output_kind(payload.request_text, payload.output_kind)
+        output_kind = detected["kind"]
         if not payload.dry_run:
-            provider_ids = {str(item.get("id") or "") for item in public_providers() if item.get("enabled", True)}
+            providers = [item for item in public_providers() if item.get("enabled", True)]
+            provider_ids = {str(item.get("id") or "") for item in providers}
             if payload.provider_id not in provider_ids:
-                raise HTTPException(status_code=400, detail="请选择已经配置好的图片 API")
+                raise HTTPException(status_code=400, detail="请选择已经配置好的 API")
             if not payload.model:
-                raise HTTPException(status_code=400, detail="请选择图片模型")
-        quantity, now = parse_quantity(payload.request_text, selected_platforms), time.time()
+                raise HTTPException(status_code=400, detail="请选择生成模型")
+            provider = next((item for item in providers if item.get("id") == payload.provider_id), {})
+            model_list = provider.get("video_models") or [] if output_kind == "video" else provider.get("image_models") or []
+            if payload.model not in model_list:
+                kind_label = "视频" if output_kind == "video" else "图片"
+                raise HTTPException(status_code=400, detail=f"所选 API 未配置“{payload.model}”{kind_label}模型，请刷新 API 设置后重试")
+        quantity, now = parse_quantity(payload.request_text, selected_platforms, output_kind), time.time()
         detail = _detail_plan(snapshot, payload.request_text, payload.template_id,
                               [item.get("module_id") for item in payload.detail_modules]) if payload.template_id else None
         if detail and detail.get("total_images"):
@@ -667,14 +821,24 @@ def register_ecommerce_agent(app, *, base_dir, submit_image_task, get_image_task
                         "quantity_source": "detail_template",
                         "batches": [min(20, detail["total_images"] - start)
                                     for start in range(0, detail["total_images"], 20)]}
+        if output_kind == "detail" and not payload.template_id:
+            detail = _detail_plan(snapshot, payload.request_text, "basic-detail")
+            quantity = {**quantity, "total_images": detail["total_images"],
+                        "page_count": detail["total_images"], "images_per_page": 1,
+                        "quantity_source": "detail_template",
+                        "batches": [min(20, detail["total_images"] - start)
+                                    for start in range(0, detail["total_images"], 20)]}
         brand_profile = read(brand_dir / f"{safe_id(payload.brand_profile_id)}.json", {}) if payload.brand_profile_id else {}
-        estimated = estimate_cost(payload.provider_id, payload.model, quantity["total_images"]) if estimate_cost and not payload.dry_run else None
+        estimated = estimate_cost(payload.provider_id, payload.model, quantity["total_images"], "video" if output_kind == "video" else "image") if estimate_cost and not payload.dry_run else None
         run = {
             "id": f"ecrun_{uuid.uuid4().hex}", "canvas_id": payload.canvas_id, "node_id": payload.node_id,
             "canvas_kind": payload.canvas_kind, "selected_node_ids": payload.selected_node_ids,
             "input_snapshot": snapshot, "brand_profile_id": payload.brand_profile_id, "brand_profile": brand_profile,
             "platforms": selected_platforms, "provider_id": payload.provider_id, "model": payload.model,
             "request_text": payload.request_text, "action": payload.action if payload.action in CREATIVE_ACTIONS else "create",
+            "output_kind": output_kind, "output_label": detected["label"],
+            "video_duration": max(1, min(60, int(payload.video_duration or 5))),
+            "aspect_ratio": payload.aspect_ratio or "16:9", "resolution": payload.resolution or "",
             "size": payload.size, "quality": payload.quality,
             "fidelity": payload.fidelity, "add_text": payload.add_text,
             "template_id": payload.template_id, "template_name": payload.template_name,
@@ -688,6 +852,10 @@ def register_ecommerce_agent(app, *, base_dir, submit_image_task, get_image_task
             "agent_analysis": _agent_analysis(snapshot, payload.request_text, payload.action),
             "pause_requested": False, "cancel_requested": False, "created_at": now, "updated_at": now,
         }
+        if detail and not payload.detail_modules:
+            run["detail_modules"] = detail.get("modules") or []
+            run["template_id"] = detail.get("template_id") or run.get("template_id")
+            run["template_name"] = detail.get("template_name") or run.get("template_name")
         run["visual_plans"] = _plans(run)
         run["outputs"] = [{"id": f"out_{uuid.uuid4().hex}", "status": "waiting", "retry_count": 0, "plan": plan}
                           for plan in run["visual_plans"]]
@@ -805,9 +973,10 @@ def register_ecommerce_agent(app, *, base_dir, submit_image_task, get_image_task
         clean = re.sub(r"[\\/:*?\"<>|]+", "_", str(value or "").strip())
         return (clean[:80] or fallback).strip(" ._") or fallback
 
-    def output_extension(url):
+    def output_extension(url, media_kind="image"):
         suffix = Path(str(url or "").split("?", 1)[0]).suffix.lower()
-        return suffix if suffix in {".png", ".jpg", ".jpeg", ".webp"} else ".png"
+        allowed = {".png", ".jpg", ".jpeg", ".webp"} if media_kind != "video" else {".mp4", ".webm", ".mov", ".m4v"}
+        return suffix if suffix in allowed else (".mp4" if media_kind == "video" else ".png")
 
     @app.post("/api/ecommerce-agent/runs/{run_id}/export")
     async def export_api(run_id: str):
@@ -832,10 +1001,12 @@ def register_ecommerce_agent(app, *, base_dir, submit_image_task, get_image_task
                 if item.get("status") != "succeeded" or not item.get("url"):
                     continue
                 plan = item["plan"]
-                ext = output_extension(item["url"])
+                ext = output_extension(item["url"], item.get("media_kind") or "image")
                 stem = f"{plan['index']:03d}_{export_name(plan.get('purpose'), '图片')}"
-                zip_media(zf, item["url"], f"{product}/生成结果/{stem}{ext}")
-                zip_media(zf, item["url"], f"{product}/干净底图/{stem}{ext}")
+                media_dir = "视频结果" if item.get("media_kind") == "video" else "生成结果"
+                zip_media(zf, item["url"], f"{product}/{media_dir}/{stem}{ext}")
+                if item.get("media_kind") != "video":
+                    zip_media(zf, item["url"], f"{product}/干净底图/{stem}{ext}")
                 module_name = export_name(plan.get("module_name"), "详情模块")
                 zip_media(zf, item["url"], f"{product}/详情页模块/{plan['index']:03d}_{module_name}/{stem}{ext}")
         return FileResponse(target, media_type="application/zip", filename=f"{product}-画布Agent交付包.zip")

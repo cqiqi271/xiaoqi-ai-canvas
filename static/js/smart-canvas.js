@@ -19425,7 +19425,7 @@ function applySmartEcommerceResults(run){
         if(canvas) canvas.connections=[...(canvas.connections || []),{id:uid('conn'),from:agent.id,to:group.id,kind:'flow'}];
     }
     fresh.forEach(output => {
-        group.images.push({url:output.url,name:(output.plan?.platform_label || '')+' · '+(output.plan?.purpose || '结果'),
+        group.images.push({url:output.url,name:(output.plan?.platform_label || '')+' · '+(output.plan?.purpose || '结果'),kind:output.media_kind || output.plan?.media_kind || 'image',
             ecommerceOutputId:output.id,ecommerceRunId:run.id,generation_cost:output.cost || null,quality_status:output.quality_status || 'needs_review'});
         (output.text_layers || []).forEach(layer => {
             const prompt={id:uid('prompt'),type:'smart-prompt',x:group.x+40,y:group.y+80+(group.items.length*86),w:316,h:100,

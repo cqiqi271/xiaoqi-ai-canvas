@@ -7,8 +7,8 @@ BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "project-config.json"
 
 DEFAULT_CONFIG = {
-    "project_name": "Infinite Canvas",
-    "home_url": "http://127.0.0.1:3011/",
+    "project_name": "小七AI画布",
+    "home_url": "/static/project-home.html",
     "version_url": "",
     "update_notes_url": "",
     "tree_url": "",
@@ -22,7 +22,7 @@ DEFAULT_CONFIG = {
 def load_config() -> dict:
     try:
         if CONFIG_PATH.exists():
-            data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            data = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
             if isinstance(data, dict):
                 return {**DEFAULT_CONFIG, **data}
     except Exception:
@@ -33,7 +33,7 @@ def load_config() -> dict:
 CONFIG = load_config()
 
 # Override runtime URLs without editing the upstream main.py.
-_main.GITHUB_REPO_URL = str(CONFIG.get("home_url") or "").strip() or _main.GITHUB_REPO_URL
+_main.GITHUB_REPO_URL = str(CONFIG.get("repo_url") or "").strip() or _main.GITHUB_REPO_URL
 _main.GITHUB_VERSION_URL = str(CONFIG.get("version_url") or "").strip() or _main.GITHUB_VERSION_URL
 _main.GITHUB_TREE_URL = str(CONFIG.get("tree_url") or "").strip() or _main.GITHUB_TREE_URL
 _main.GITHUB_UPDATE_NOTES_URL = str(CONFIG.get("update_notes_url") or "").strip() or _main.GITHUB_UPDATE_NOTES_URL
@@ -44,8 +44,8 @@ _main.MODELSCOPE_TREE_URL = str(CONFIG.get("mirror_tree_url") or "").strip() or 
 
 # Keep the update UI labels readable and stable.
 _main.UPDATE_SOURCE_LABELS = {
-    "github": str(CONFIG.get("project_name") or "Infinite Canvas").strip(),
-    "modelscope": "Backup Update Source",
+    "github": str(CONFIG.get("project_name") or "小七AI画布").strip(),
+    "modelscope": "国内更新源",
 }
 
 app = _main.app

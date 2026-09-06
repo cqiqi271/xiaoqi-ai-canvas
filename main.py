@@ -36,7 +36,7 @@ from io import BytesIO
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File, Form, Header, Request, Body
 from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, Response, StreamingResponse, JSONResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -163,7 +163,7 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 GLOBAL_LOOP = None
-APP_VERSION = "2026.08.31"
+APP_VERSION = "2026.09.06"
 GITHUB_REPO_URL = "https://github.com/cqiqi271/xiaoqi-ai-canvas"
 GITHUB_VERSION_URL = "https://raw.githubusercontent.com/cqiqi271/xiaoqi-ai-canvas/main/VERSION"
 GITHUB_TREE_URL = "https://api.github.com/repos/cqiqi271/xiaoqi-ai-canvas/git/trees/main?recursive=1"
@@ -762,7 +762,8 @@ def read_project_config() -> Dict[str, str]:
     }
     try:
         if os.path.exists(PROJECT_CONFIG_FILE):
-            with open(PROJECT_CONFIG_FILE, "r", encoding="utf-8") as f:
+            # PowerShell 的 Set-Content -Encoding utf8 会写入 BOM；兼容带 BOM 和无 BOM 配置。
+            with open(PROJECT_CONFIG_FILE, "r", encoding="utf-8-sig") as f:
                 data = json.load(f)
             if isinstance(data, dict):
                 for key in defaults:
@@ -1814,10 +1815,10 @@ def app_info():
     github_tree_url = cfg.get("tree_url") or GITHUB_TREE_URL
     github_notes_url = cfg.get("update_notes_url") or GITHUB_UPDATE_NOTES_URL
     modelscope_repo_url = cfg.get("mirror_repo_url") or repo_url
-    modelscope_version_url = cfg.get("mirror_version_url") or github_version_url
-    modelscope_tree_url = cfg.get("mirror_tree_url") or github_tree_url
-    modelscope_notes_url = cfg.get("mirror_update_notes_url") or github_notes_url
-    modelscope_raw_root = cfg.get("mirror_raw_root_url") or cfg.get("raw_root_url") or GITHUB_RAW_ROOT
+    modelscope_version_url = cfg.get("mirror_version_url") or MODELSCOPE_VERSION_URL
+    modelscope_tree_url = cfg.get("mirror_tree_url") or MODELSCOPE_TREE_URL
+    modelscope_notes_url = cfg.get("mirror_update_notes_url") or MODELSCOPE_UPDATE_NOTES_URL
+    modelscope_raw_root = cfg.get("mirror_raw_root_url") or MODELSCOPE_FILE_API_ROOT
     return {
         "version": version,
         "project_name": cfg.get("project_name") or "小七AI画布",
@@ -1835,7 +1836,7 @@ def app_info():
                 "raw_root_url": cfg.get("raw_root_url") or GITHUB_RAW_ROOT,
             },
             "modelscope": {
-                "label": "备用更新源" if cfg.get("mirror_version_url") else "GitHub 备用源",
+                "label": "国内更新源" if cfg.get("mirror_version_url") else "ModelScope 国内源",
                 "repo_url": modelscope_repo_url,
                 "version_url": modelscope_version_url,
                 "tree_url": modelscope_tree_url,
@@ -2019,7 +2020,13 @@ def update_allowed_file(path: str) -> bool:
     path = str(path or "").replace("\\", "/").lstrip("/")
     if not path or any(part in {"", ".", ".."} for part in path.split("/")):
         return False
-    return path in {"main.py", "VERSION", "project-config.json"} or path.startswith(("static/", "workflows/"))
+    update_root_files = {
+        "main.py", "ecommerce_agent.py", "VERSION", "project-config.json",
+        "launcher.py", "run.bat", "start-server.bat",
+        "server-console.bat", "wait-for-server.ps1",
+        "find-free-port.ps1", "update.bat",
+    }
+    return path in update_root_files or path.startswith(("static/", "workflows/"))
 
 # 缓存 GitHub Tree API 响应（含 ETag），减少 60 次/h 限流压力
 GITHUB_TREE_CACHE: Dict[str, Any] = {"etag": "", "data": None, "expires_at": 0.0}
@@ -8132,10 +8139,13 @@ async def media_preview(url: str, w: int = 512):
     url = rewrite_runninghub_file_url(url)
     path = output_file_from_url(url)
     if not path and re.match(r"^https?://", str(url or ""), re.I):
-        # Generated results are returned to the canvas immediately while the
-        # original is cached in the background. Reuse that download here so
-        # the browser only decodes a small preview instead of a 2K/4K image.
-        path = await ensure_remote_image_cached(url, "output")
+        # Do not make the first preview wait for a full remote download plus
+        # PIL processing. The browser can display the upstream image while a
+        # background task warms the local cache for subsequent previews.
+        path = cached_remote_image_path(url, "output")
+        if not path:
+            schedule_remote_image_cache(url, "output")
+            return RedirectResponse(url=url, status_code=307)
     if not path or not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="媒体文件不存在")
 
@@ -20341,6 +20351,11 @@ async def ecommerce_submit_image_task(raw: Dict[str, Any]) -> Dict[str, Any]:
     return await create_canvas_image_task(OnlineImageRequest(**raw))
 
 
+async def ecommerce_submit_video_task(raw: Dict[str, Any]) -> Dict[str, Any]:
+    # Reuse the existing video pipeline so Agent videos share the user's current API settings and billing logic.
+    return await canvas_video(CanvasVideoRequest(**raw))
+
+
 def ecommerce_get_image_task(task_id: str) -> Dict[str, Any]:
     with CANVAS_TASK_LOCK:
         return copy.deepcopy(CANVAS_TASKS.get(task_id) or {})
@@ -20356,12 +20371,12 @@ def ecommerce_cancel_image_task(task_id: str) -> bool:
         return True
 
 
-def ecommerce_estimate_cost(provider_id: str, model: str, count: int) -> Optional[Dict[str, Any]]:
+def ecommerce_estimate_cost(provider_id: str, model: str, count: int, kind: str = "image") -> Optional[Dict[str, Any]]:
     try:
         provider = get_api_provider_exact(provider_id)
         return (
-            configured_generation_cost(provider, model, "image", count)
-            or central_catalog_generation_cost(provider, model, "image", count)
+            configured_generation_cost(provider, model, kind, count)
+            or central_catalog_generation_cost(provider, model, kind, count)
         )
     except Exception:
         return None
@@ -20375,6 +20390,7 @@ ECOMMERCE_AGENT = register_ecommerce_agent(
     cancel_image_task=ecommerce_cancel_image_task,
     public_providers=public_api_providers,
     estimate_cost=ecommerce_estimate_cost,
+    submit_video_task=ecommerce_submit_video_task,
 )
 
 if __name__ == "__main__":
@@ -20382,7 +20398,14 @@ if __name__ == "__main__":
     # 关闭服务端协议级 WebSocket ping：部分客户端（如 PS UXP 面板）不会自动回 pong，
     # 默认 20s ping/20s 超时会把这些连接每隔一会儿就踢掉造成"频繁断连"。
     # 客户端有自己的应用层心跳 + 断线重连兜底，这里禁用协议 ping 更稳。
-    uvicorn.run(app, host="0.0.0.0", port=3011,
+    # 启动器会把实际选中的端口放进 APP_PORT；保留 3011 作为手动直接运行的默认值。
+    try:
+        runtime_port = int(os.getenv("APP_PORT", "3011"))
+    except (TypeError, ValueError):
+        runtime_port = 3011
+    if not 1 <= runtime_port <= 65535:
+        runtime_port = 3011
+    uvicorn.run(app, host="0.0.0.0", port=runtime_port,
                 ws_ping_interval=None, ws_ping_timeout=None)
 
 

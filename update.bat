@@ -67,20 +67,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$src = [System.IO.Path]::GetFullPath('%SRC%'); ^
    $dst = [System.IO.Path]::GetFullPath('%TARGET%'); ^
    if ($src.TrimEnd('\\') -eq $dst.TrimEnd('\\')) { throw 'Source and target are the same folder.' } ^
-   $preserveDirs = @('data','assets','output','.git','__pycache__'); ^
-   $preserveFiles = @('run.log','update.log','target-path.txt'); ^
+   $preserveDirs = @('data','assets','output','API','.git','__pycache__'); ^
+   $preserveFiles = @('history.json','run.log','update.log','target-path.txt'); ^
    $items = Get-ChildItem -LiteralPath $src -Force; ^
    foreach ($item in $items) { ^
      $name = $item.Name; ^
      if ($item.PSIsContainer) { ^
        if ($preserveDirs -contains $name) { continue } ^
-       if ($name -eq 'API') { ^
-         New-Item -ItemType Directory -Force -Path (Join-Path $dst 'API') | Out-Null; ^
-         $envSrc = Join-Path $src 'API\.env'; ^
-         $envDst = Join-Path $dst 'API\.env'; ^
-         if (Test-Path -LiteralPath $envSrc) { Copy-Item -LiteralPath $envSrc -Destination $envDst -Force } ^
-         continue ^
-       } ^
        $destPath = Join-Path $dst $name; ^
        if (Test-Path -LiteralPath $destPath) { Remove-Item -LiteralPath $destPath -Recurse -Force } ^
        Copy-Item -LiteralPath $item.FullName -Destination $destPath -Recurse -Force; ^

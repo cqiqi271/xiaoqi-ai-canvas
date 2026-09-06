@@ -1,0 +1,12 @@
+Xiaoqi AI Canvas Share Package
+
+1. Unzip this package to any folder.
+2. Double-click `run.bat`.
+3. If the browser does not open automatically, use the exact address shown in the server window (for example `http://127.0.0.1:3012/`).
+
+Notes:
+- This is a local package. You do not need online deployment first.
+- If you want to use online AI features, fill in the API key in the API settings.
+- This package does not include the creator's local history data, caches, or secrets.
+- If you need an update later, use the new update package and keep the existing installation's data, assets, output, API/.env and history.json.
+- If another local project already uses the default port, this app automatically selects the next available port.
