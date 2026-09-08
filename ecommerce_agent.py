@@ -168,6 +168,7 @@ class ParsePayload(BaseModel):
     request_text: str = ""
     platforms: List[str] = []
     output_kind: str = "auto"
+    quantity_override: int = 0
 
 
 class AnalyzePayload(BaseModel):
@@ -181,6 +182,7 @@ class DetailPlanPayload(BaseModel):
     request_text: str = ""
     template_id: str = "basic-detail"
     module_ids: List[str] = []
+    quantity_override: int = 0
 
 
 class RunPayload(BaseModel):
@@ -206,6 +208,7 @@ class RunPayload(BaseModel):
     detail_modules: List[Dict[str, Any]] = []
     template_version: str = "1"
     output_kind: str = "auto"
+    quantity_override: int = 0
     video_duration: int = 5
     aspect_ratio: str = "16:9"
     resolution: str = ""
@@ -250,11 +253,23 @@ def detect_output_kind(text: str, requested: str = "auto") -> Dict[str, Any]:
     return {"kind": kind, **OUTPUT_KIND_INFO[kind], "source": "text"}
 
 
-def parse_quantity(text: str, platforms=None, output_kind: str = "auto") -> Dict[str, Any]:
+def parse_quantity(text: str, platforms=None, output_kind: str = "auto", quantity_override: int = 0) -> Dict[str, Any]:
     text = str(text or "").strip()
     output = detect_output_kind(text, output_kind)
     kind = output["kind"]
     warnings = []
+    try:
+        quantity_override = int(quantity_override or 0)
+    except (TypeError, ValueError):
+        quantity_override = 0
+    if quantity_override:
+        total = max(1, min(200, quantity_override))
+        return {
+            "page_count": total, "images_per_page": 1, "total_images": total,
+            "quantity_source": "manual_override", "warnings": warnings,
+            "batches": [min(20, total - start) for start in range(0, total, 20)],
+            "output_kind": kind, "output_label": output["label"],
+        }
     explicit = re.search(r"总(?:共|计)?\s*(\d+)\s*张", text)
     page_each = re.search(r"(\d+)\s*页[^\d]{0,12}(?:每页|一页)\s*(\d+)\s*张", text)
     page = re.search(r"(\d+)\s*页", text)
@@ -365,13 +380,13 @@ def _detail_template(template_id):
     return DETAIL_TEMPLATE_MAP.get(str(template_id or "").strip()) or DETAIL_TEMPLATE_MAP["basic-detail"]
 
 
-def _detail_plan(snapshot, request_text="", template_id="basic-detail", module_ids=None):
+def _detail_plan(snapshot, request_text="", template_id="basic-detail", module_ids=None, quantity_override: int = 0):
     template = _detail_template(template_id)
     requested = set(str(item) for item in (module_ids or []) if item)
     modules = [item for item in template["modules"] if not requested or item["id"] in requested]
     if not modules:
         modules = list(template["modules"])
-    quantity = parse_quantity(request_text, ["canvas"])
+    quantity = parse_quantity(request_text, ["canvas"], "detail", quantity_override)
     total = quantity["total_images"] if quantity["quantity_source"] != "automatic" else len(modules)
     rows = []
     for index in range(total):
@@ -799,7 +814,7 @@ def register_ecommerce_agent(app, *, base_dir, submit_image_task, get_image_task
     @app.post("/api/ecommerce-agent/parse-request")
     async def parse_api(payload: ParsePayload):
         selected = [item for item in payload.platforms if item in PLATFORMS] or ["canvas"]
-        quantity = parse_quantity(payload.request_text, selected, payload.output_kind)
+        quantity = parse_quantity(payload.request_text, selected, payload.output_kind, payload.quantity_override)
         detected = detect_output_kind(payload.request_text, payload.output_kind)
         return {"quantity": quantity, "output": detected,
                 "platforms": [{"id": item, **PLATFORMS[item]} for item in selected]}
@@ -816,7 +831,7 @@ def register_ecommerce_agent(app, *, base_dir, submit_image_task, get_image_task
     async def detail_plan_api(payload: DetailPlanPayload):
         if not [item for item in payload.input_snapshot if isinstance(item, dict)]:
             raise HTTPException(status_code=400, detail="请先在画布中选中商品图片或说明文字")
-        plan = _detail_plan(payload.input_snapshot, payload.request_text, payload.template_id, payload.module_ids)
+        plan = _detail_plan(payload.input_snapshot, payload.request_text, payload.template_id, payload.module_ids, payload.quantity_override)
         plan["analysis"] = _agent_analysis(payload.input_snapshot, payload.request_text, "create")
         return {"plan": plan}
 
@@ -850,9 +865,10 @@ def register_ecommerce_agent(app, *, base_dir, submit_image_task, get_image_task
             if payload.model not in model_list:
                 kind_label = "视频" if output_kind == "video" else "图片"
                 raise HTTPException(status_code=400, detail=f"所选 API 未配置“{payload.model}”{kind_label}模型，请刷新 API 设置后重试")
-        quantity, now = parse_quantity(payload.request_text, selected_platforms, output_kind), time.time()
+        quantity, now = parse_quantity(payload.request_text, selected_platforms, output_kind, payload.quantity_override), time.time()
         detail = _detail_plan(snapshot, payload.request_text, payload.template_id,
-                              [item.get("module_id") for item in payload.detail_modules]) if payload.template_id else None
+                              [item.get("module_id") for item in payload.detail_modules],
+                              payload.quantity_override) if payload.template_id else None
         if detail and detail.get("total_images"):
             quantity = {**quantity, "total_images": detail["total_images"],
                         "page_count": detail["total_images"], "images_per_page": 1,
@@ -860,7 +876,7 @@ def register_ecommerce_agent(app, *, base_dir, submit_image_task, get_image_task
                         "batches": [min(20, detail["total_images"] - start)
                                     for start in range(0, detail["total_images"], 20)]}
         if output_kind == "detail" and not payload.template_id:
-            detail = _detail_plan(snapshot, payload.request_text, "basic-detail")
+            detail = _detail_plan(snapshot, payload.request_text, "basic-detail", quantity_override=payload.quantity_override)
             quantity = {**quantity, "total_images": detail["total_images"],
                         "page_count": detail["total_images"], "images_per_page": 1,
                         "quantity_source": "detail_template",

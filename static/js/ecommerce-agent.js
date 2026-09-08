@@ -1,6 +1,6 @@
 (function(){
     'use strict';
-    var state={platforms:[],providers:[],brands:[],templates:[],detailPlan:null,history:[],run:null,action:'create',outputKind:'auto',parsedOutput:null,timer:0,parseTimer:0,analysis:null,viewerIndex:0,viewerSources:[],viewerSourceIndex:0,viewerLoadToken:0,viewerTimer:0,initTimer:0,initAttempts:0,initialized:false};
+    var state={platforms:[],providers:[],brands:[],templates:[],detailPlan:null,history:[],run:null,action:'create',outputKind:'auto',quantityMode:'auto',customQuantity:'',parsedOutput:null,timer:0,parseTimer:0,analysis:null,viewerIndex:0,viewerSources:[],viewerSourceIndex:0,viewerLoadToken:0,viewerTimer:0,initTimer:0,initAttempts:0,initialized:false};
     function one(q,r){return (r||document).querySelector(q)}
     function all(q,r){return Array.prototype.slice.call((r||document).querySelectorAll(q))}
     function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
@@ -26,7 +26,7 @@
         '<header class="ec-agent-head"><div class="ec-agent-mark"><i data-lucide="bot"></i></div><div><h2>画布创作 Agent</h2><p>选中素材，用一句话继续创作，结果直接回到画布</p></div><button class="ec-agent-close" id="ecClose" title="关闭"><i data-lucide="x"></i></button></header>',
         '<div class="ec-agent-scroll">',
         '<section class="ec-section"><div class="ec-section-head"><i data-lucide="scan-search"></i><strong>选中素材</strong><span id="ecSelectedCount">0 个节点</span></div><div id="ecHealth" class="ec-health" role="status">正在检查 Agent 服务...</div><div id="ecSelected" class="ec-selected"></div><div class="ec-actions"><button class="ec-btn" id="ecRefreshSelection">刷新选中内容</button><button class="ec-btn" id="ecCreateNode">放入 Agent 节点</button><button class="ec-btn primary" id="ecAnalyze">分析并规划</button></div><p class="ec-hint">Agent 只读取当前选中的图片、文字和参考素材，不会混入画布里的其他内容。</p><div id="ecAnalysis" class="ec-analysis"><div class="ec-empty">点击“分析并规划”，先查看 Agent 准备怎么做。</div></div></section>',
-        '<section class="ec-section"><div class="ec-section-head"><i data-lucide="wand-sparkles"></i><strong>创作指令</strong><span>只读取当前选中内容</span></div><div id="ecOutputChips" class="ec-output-chips"><button type="button" class="ec-output-chip active" data-ec-output="auto">自动判断</button><button type="button" class="ec-output-chip" data-ec-output="detail">一套详情页</button><button type="button" class="ec-output-chip" data-ec-output="main">一套商品主图</button><button type="button" class="ec-output-chip" data-ec-output="video">一条商品视频</button></div><div id="ecActionChips" class="ec-action-chips"><button type="button" class="ec-action-chip active" data-ec-action="create">开始创作</button><button type="button" class="ec-action-chip" data-ec-action="variation">生成变体</button><button type="button" class="ec-action-chip" data-ec-action="background">换背景</button><button type="button" class="ec-action-chip" data-ec-action="expand">扩展画面</button><button type="button" class="ec-action-chip" data-ec-action="refine">局部优化</button><button type="button" class="ec-action-chip" data-ec-action="continue">继续创作</button></div><label class="ec-field"><span>用大白话告诉 Agent 想做什么</span><textarea id="ecRequest" placeholder="例如：帮我把这个商品做成一套详情页，突出材质和使用场景">帮我做 6 张风格统一的商品主图，保持商品外观不变</textarea></label><div id="ecParseSummary" class="ec-parse-summary"></div><div id="ecWarnings"></div>',
+        '<section class="ec-section"><div class="ec-section-head"><i data-lucide="wand-sparkles"></i><strong>创作指令</strong><span>只读取当前选中内容</span></div><div id="ecOutputChips" class="ec-output-chips"><button type="button" class="ec-output-chip active" data-ec-output="auto">自动判断</button><button type="button" class="ec-output-chip" data-ec-output="detail">一套详情页</button><button type="button" class="ec-output-chip" data-ec-output="main">一套商品主图</button><button type="button" class="ec-output-chip" data-ec-output="video">一条商品视频</button></div><div id="ecActionChips" class="ec-action-chips"><button type="button" class="ec-action-chip active" data-ec-action="create">开始创作</button><button type="button" class="ec-action-chip" data-ec-action="variation">生成变体</button><button type="button" class="ec-action-chip" data-ec-action="background">换背景</button><button type="button" class="ec-action-chip" data-ec-action="expand">扩展画面</button><button type="button" class="ec-action-chip" data-ec-action="refine">局部优化</button><button type="button" class="ec-action-chip" data-ec-action="continue">继续创作</button></div><label class="ec-field"><span>用大白话告诉 Agent 想做什么</span><textarea id="ecRequest" placeholder="例如：帮我把这个商品做成一套详情页，突出材质和使用场景">帮我做一套风格统一的商品主图，保持商品外观不变</textarea></label><div class="ec-quantity"><div class="ec-quantity-head"><strong>生成数量</strong><span>可选或自定义，最多 200 张</span></div><div id="ecQuantityChips" class="ec-quantity-chips"><button type="button" class="ec-quantity-chip active" data-ec-quantity="auto">自动规划</button><button type="button" class="ec-quantity-chip" data-ec-quantity="4">4 张</button><button type="button" class="ec-quantity-chip" data-ec-quantity="6">6 张</button><button type="button" class="ec-quantity-chip" data-ec-quantity="9">9 张</button><button type="button" class="ec-quantity-chip" data-ec-quantity="12">12 张</button><button type="button" class="ec-quantity-chip" data-ec-quantity="custom">自定义</button></div><label id="ecCustomQuantityWrap" class="ec-custom-quantity" hidden><span>输入数量</span><input id="ecCustomQuantity" type="number" min="1" max="200" step="1" placeholder="例如 15"><em>手动数量会覆盖提示词里的数量，点“自动规划”恢复自动识别。</em></label></div><div id="ecParseSummary" class="ec-parse-summary"></div><div id="ecWarnings"></div>',
         '<section class="ec-section ec-template-section"><div class="ec-section-head"><i data-lucide="layout-template"></i><strong>详情页模板</strong><span>先预览结构，不会扣费</span></div><div id="ecTemplates" class="ec-templates"><div class="ec-empty">正在读取模板...</div></div><div id="ecTemplatePlan" class="ec-template-plan"><div class="ec-empty">选择一个模板后，会显示详情页模块顺序。</div></div></section>',
         '<div class="ec-row"><label class="ec-field"><span id="ecProviderLabel">图片 API</span><select id="ecProvider"></select></label><label class="ec-field"><span id="ecModelLabel">图片模型</span><select id="ecModel"></select></label></div><div id="ecVideoOptions" class="ec-video-options" hidden><label class="ec-field"><span>视频时长（秒）</span><input id="ecVideoDuration" type="number" min="1" max="60" value="5"></label><label class="ec-field"><span>画面比例</span><select id="ecAspectRatio"><option>16:9</option><option>9:16</option><option>1:1</option><option>4:3</option><option>3:4</option></select></label></div><label class="ec-check" style="margin-top:8px"><input id="ecAddText" type="checkbox" checked>保留可编辑文字层</label><label class="ec-check"><input id="ecStrictFidelity" type="checkbox" checked>严格保留主体、Logo 和原有文字</label></section>',
         '<section class="ec-section"><div class="ec-section-head"><i data-lucide="workflow"></i><strong>执行</strong><span>结果自动放回画布</span></div><div class="ec-actions"><button class="ec-btn" id="ecDryRun">预演方案（不扣费）</button><button class="ec-btn primary" id="ecStart">开始生成</button><button class="ec-btn" id="ecPause" disabled>暂停</button><button class="ec-btn" id="ecResume" disabled>继续</button><button class="ec-btn danger" id="ecCancel" disabled>取消</button></div></section>',
@@ -55,6 +55,18 @@
         return '';
     }
     function requestedOutputKind(){return explicitOutputKind(one('#ecRequest')&&one('#ecRequest').value)||activeOutputKind()}
+    function quantityOverride(){
+        if(state.quantityMode==='auto')return 0;
+        var value=state.quantityMode==='custom'?Number(one('#ecCustomQuantity')&&one('#ecCustomQuantity').value):Number(state.quantityMode);
+        if(!Number.isFinite(value)||value<1)return 0;
+        return Math.max(1,Math.min(200,Math.round(value)));
+    }
+    function syncQuantityUi(){
+        all('.ec-quantity-chip').forEach(function(item){item.classList.toggle('active',item.getAttribute('data-ec-quantity')===String(state.quantityMode))});
+        var custom=state.quantityMode==='custom',wrap=one('#ecCustomQuantityWrap');
+        if(wrap)wrap.hidden=!custom;
+        if(custom&&one('#ecCustomQuantity')&&!one('#ecCustomQuantity').value)one('#ecCustomQuantity').value=state.customQuantity||'';
+    }
     function outputLabel(){return (state.parsedOutput&&state.parsedOutput.label)||({detail:'详情页',main:'商品主图',video:'商品视频'})[activeOutputKind()]||'商品主图'}
     function syncOutputUi(){
         var kind=activeOutputKind(),video=kind==='video';
@@ -99,17 +111,17 @@
     function selectTemplate(id){
         var source=selected();if(!source.length){one('#ecTemplatePlan').innerHTML='<div class="ec-warning">请先在画布中选中商品图片，再选择详情页模板。</div>';return}
         state.outputKind='detail';syncOutputUi();renderModels();
-        api('/api/ecommerce-agent/detail-plan',{method:'POST',body:JSON.stringify({input_snapshot:source,request_text:one('#ecRequest').value,template_id:id})}).then(function(data){state.detailPlan=data.plan||null;renderTemplates();renderTemplatePlan();parseRequest()}).catch(function(e){one('#ecTemplatePlan').innerHTML='<div class="ec-warning">模板预览失败：'+esc(e.message)+'</div>'});
+        api('/api/ecommerce-agent/detail-plan',{method:'POST',body:JSON.stringify({input_snapshot:source,request_text:one('#ecRequest').value,template_id:id,quantity_override:quantityOverride()})}).then(function(data){state.detailPlan=data.plan||null;renderTemplates();renderTemplatePlan();parseRequest()}).catch(function(e){one('#ecTemplatePlan').innerHTML='<div class="ec-warning">模板预览失败：'+esc(e.message)+'</div>'});
     }
     function previewDefaultDetailTemplate(){
         if(activeOutputKind()!=='detail'||state.detailPlan)return;
         var source=selected();if(!source.length)return;
-        api('/api/ecommerce-agent/detail-plan',{method:'POST',body:JSON.stringify({input_snapshot:source,request_text:one('#ecRequest').value,template_id:'basic-detail'})}).then(function(data){
+        api('/api/ecommerce-agent/detail-plan',{method:'POST',body:JSON.stringify({input_snapshot:source,request_text:one('#ecRequest').value,template_id:'basic-detail',quantity_override:quantityOverride()})}).then(function(data){
             state.detailPlan=data.plan||null;renderTemplates();renderTemplatePlan();
         }).catch(function(e){console.warn('基础详情页预览失败',e)});
     }
     function renderBase(){
-        syncOutputUi();renderModels();
+        syncOutputUi();syncQuantityUi();renderModels();
     }
     async function loadBase(){
         var results=await Promise.all([api('/api/ecommerce-agent/platforms'),api('/api/ecommerce-agent/detail-templates')]);
@@ -159,7 +171,7 @@
     }
     async function parseRequest(){
         try{
-            var data=await api('/api/ecommerce-agent/parse-request',{method:'POST',body:JSON.stringify({request_text:one('#ecRequest').value,platforms:platformIds(),output_kind:state.outputKind})});
+            var data=await api('/api/ecommerce-agent/parse-request',{method:'POST',body:JSON.stringify({request_text:one('#ecRequest').value,platforms:platformIds(),output_kind:state.outputKind,quantity_override:quantityOverride()})});
             var q=data.quantity||{};
             state.parsedOutput=data.output||null;syncOutputUi();renderModels();
             if(q.output_kind!=='detail'&&state.outputKind==='auto')state.detailPlan=null;
@@ -186,10 +198,11 @@
         var source=selected();if(!source.length)throw new Error('请先在画布里选中图片、文字或参考素材');
         var agent=ensureAgent();
         var outputKind=requestedOutputKind(),detail=outputKind==='detail'?state.detailPlan:null;
-        return {canvas_id:bridge().getCanvasId?bridge().getCanvasId():'',node_id:agent&&agent.id||'',canvas_kind:bridge().kind||'classic',selected_node_ids:source.map(function(n){return n.id}),input_snapshot:source,brand_profile_id:'',platforms:['canvas'],provider_id:one('#ecProvider').value,model:one('#ecModel').value,request_text:one('#ecRequest').value,action:state.action,size:'',quality:'auto',fidelity:one('#ecStrictFidelity')&&one('#ecStrictFidelity').checked?'strict':'balanced',add_text:one('#ecAddText').checked,max_retries:2,dry_run:dry,template_id:detail&&detail.template_id||'',template_name:detail&&detail.template_name||'',detail_modules:detail&&detail.modules||[],template_version:'1',output_kind:outputKind,video_duration:Number(one('#ecVideoDuration').value||5),aspect_ratio:one('#ecAspectRatio').value||'16:9',resolution:''};
+        return {canvas_id:bridge().getCanvasId?bridge().getCanvasId():'',node_id:agent&&agent.id||'',canvas_kind:bridge().kind||'classic',selected_node_ids:source.map(function(n){return n.id}),input_snapshot:source,brand_profile_id:'',platforms:['canvas'],provider_id:one('#ecProvider').value,model:one('#ecModel').value,request_text:one('#ecRequest').value,action:state.action,size:'',quality:'auto',fidelity:one('#ecStrictFidelity')&&one('#ecStrictFidelity').checked?'strict':'balanced',add_text:one('#ecAddText').checked,max_retries:2,dry_run:dry,template_id:detail&&detail.template_id||'',template_name:detail&&detail.template_name||'',detail_modules:detail&&detail.modules||[],template_version:'1',output_kind:outputKind,quantity_override:quantityOverride(),video_duration:Number(one('#ecVideoDuration').value||5),aspect_ratio:one('#ecAspectRatio').value||'16:9',resolution:''};
     }
     async function startRun(dry){
         try{
+         if(state.quantityMode==='custom'&&!quantityOverride()){alert('请先输入自定义生成数量（1 到 200 张）。');return;}
          if(!await analyzeSelection())return;
          if(!dry&&!confirm('将按当前数量向选定 API 提交图片任务，可能产生费用。确认开始吗？'))return;
             var data=await api('/api/ecommerce-agent/runs',{method:'POST',body:JSON.stringify(makePayload(dry))});
@@ -287,7 +300,16 @@
              state.parsedOutput=null;clearTimeout(state.parseTimer);state.parseTimer=setTimeout(parseRequest,350)
          };
         one('#ecOutputChips').addEventListener('click',function(e){var chip=e.target.closest('[data-ec-output]');if(!chip)return;state.outputKind=chip.getAttribute('data-ec-output')||'auto';state.parsedOutput=null;if(state.outputKind!=='detail')state.detailPlan=null;syncOutputUi();renderModels();parseRequest();renderTemplates();renderTemplatePlan();if(state.outputKind==='detail')previewDefaultDetailTemplate();});
-         one('#ecActionChips').addEventListener('click',function(e){var chip=e.target.closest('[data-ec-action]');if(!chip)return;state.action=chip.getAttribute('data-ec-action')||'create';all('.ec-action-chip').forEach(function(item){item.classList.toggle('active',item===chip)});analyzeSelection();});
+        one('#ecActionChips').addEventListener('click',function(e){var chip=e.target.closest('[data-ec-action]');if(!chip)return;state.action=chip.getAttribute('data-ec-action')||'create';all('.ec-action-chip').forEach(function(item){item.classList.toggle('active',item===chip)});analyzeSelection();});
+        one('#ecQuantityChips').addEventListener('click',function(e){
+            var chip=e.target.closest('[data-ec-quantity]');if(!chip)return;
+            state.quantityMode=chip.getAttribute('data-ec-quantity')||'auto';
+            if(state.quantityMode==='custom'&&one('#ecCustomQuantity'))one('#ecCustomQuantity').focus();
+            syncQuantityUi();if(activeOutputKind()==='detail')state.detailPlan=null;clearTimeout(state.parseTimer);state.parseTimer=setTimeout(parseRequest,120);
+        });
+        one('#ecCustomQuantity').addEventListener('input',function(){
+            state.customQuantity=this.value;state.quantityMode='custom';syncQuantityUi();if(activeOutputKind()==='detail')state.detailPlan=null;clearTimeout(state.parseTimer);state.parseTimer=setTimeout(parseRequest,180);
+        });
         one('#ecDryRun').onclick=function(){startRun(true)};one('#ecStart').onclick=function(){startRun(false)};one('#ecPause').onclick=function(){action('pause')};one('#ecResume').onclick=function(){action('resume')};one('#ecCancel').onclick=function(){action('cancel')};one('#ecFactOnly').onclick=function(){action('fact-only')};one('#ecExport').onclick=exportRun;one('#ecViewDetail').onclick=function(){showViewer(0)};
     }
     function init(){
