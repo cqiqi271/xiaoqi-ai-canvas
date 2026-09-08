@@ -47,6 +47,14 @@
     }
     function platformIds(){return ['canvas']}
     function activeOutputKind(){return state.outputKind!=='auto'?state.outputKind:((state.parsedOutput&&state.parsedOutput.kind)||'main')}
+    function explicitOutputKind(text){
+        text=String(text||'').trim();
+        if(/视频|短视频|宣传片|广告片|商品片/i.test(text))return 'video';
+        if(/详情页|详情图|详情页面|详情/i.test(text))return 'detail';
+        if(/主图|白底图|商品图|产品图|电商图|套图/i.test(text))return 'main';
+        return '';
+    }
+    function requestedOutputKind(){return explicitOutputKind(one('#ecRequest')&&one('#ecRequest').value)||activeOutputKind()}
     function outputLabel(){return (state.parsedOutput&&state.parsedOutput.label)||({detail:'详情页',main:'商品主图',video:'商品视频'})[activeOutputKind()]||'商品主图'}
     function syncOutputUi(){
         var kind=activeOutputKind(),video=kind==='video';
@@ -156,6 +164,7 @@
             state.parsedOutput=data.output||null;syncOutputUi();renderModels();
             if(q.output_kind!=='detail'&&state.outputKind==='auto')state.detailPlan=null;
             var unit=q.output_kind==='video'?'条':'张';
+            if(state.outputKind==='auto'&&q.output_kind!==activeOutputKind()){state.detailPlan=null;syncOutputUi();renderTemplates();renderTemplatePlan()}
             one('#ecParseSummary').innerHTML='<span class="ec-chip">'+esc(outputLabel())+' <strong>'+Number(q.total_images||0)+' '+unit+'</strong></span><span class="ec-chip">任务批次 <strong>'+Number((q.batches||[]).length||1)+'</strong></span>'+(q.output_kind==='detail'&&!state.detailPlan?'<span class="ec-chip">将自动套用 <strong>基础详情页</strong></span>':'');
             one('#ecWarnings').innerHTML=(q.warnings||[]).map(function(w){return '<div class="ec-warning">'+esc(w)+'</div>'}).join('');
             if(q.output_kind==='detail'&&!state.detailPlan)previewDefaultDetailTemplate();
@@ -176,8 +185,8 @@
     function makePayload(dry){
         var source=selected();if(!source.length)throw new Error('请先在画布里选中图片、文字或参考素材');
         var agent=ensureAgent();
-        var detail=activeOutputKind()==='detail'?state.detailPlan:null;
-        return {canvas_id:bridge().getCanvasId?bridge().getCanvasId():'',node_id:agent&&agent.id||'',canvas_kind:bridge().kind||'classic',selected_node_ids:source.map(function(n){return n.id}),input_snapshot:source,brand_profile_id:'',platforms:['canvas'],provider_id:one('#ecProvider').value,model:one('#ecModel').value,request_text:one('#ecRequest').value,action:state.action,size:'',quality:'auto',fidelity:one('#ecStrictFidelity')&&one('#ecStrictFidelity').checked?'strict':'balanced',add_text:one('#ecAddText').checked,max_retries:2,dry_run:dry,template_id:detail&&detail.template_id||'',template_name:detail&&detail.template_name||'',detail_modules:detail&&detail.modules||[],template_version:'1',output_kind:state.outputKind,video_duration:Number(one('#ecVideoDuration').value||5),aspect_ratio:one('#ecAspectRatio').value||'16:9',resolution:''};
+        var outputKind=requestedOutputKind(),detail=outputKind==='detail'?state.detailPlan:null;
+        return {canvas_id:bridge().getCanvasId?bridge().getCanvasId():'',node_id:agent&&agent.id||'',canvas_kind:bridge().kind||'classic',selected_node_ids:source.map(function(n){return n.id}),input_snapshot:source,brand_profile_id:'',platforms:['canvas'],provider_id:one('#ecProvider').value,model:one('#ecModel').value,request_text:one('#ecRequest').value,action:state.action,size:'',quality:'auto',fidelity:one('#ecStrictFidelity')&&one('#ecStrictFidelity').checked?'strict':'balanced',add_text:one('#ecAddText').checked,max_retries:2,dry_run:dry,template_id:detail&&detail.template_id||'',template_name:detail&&detail.template_name||'',detail_modules:detail&&detail.modules||[],template_version:'1',output_kind:outputKind,video_duration:Number(one('#ecVideoDuration').value||5),aspect_ratio:one('#ecAspectRatio').value||'16:9',resolution:''};
     }
     async function startRun(dry){
         try{
@@ -271,7 +280,12 @@
         one('#ecTemplates').addEventListener('click',function(e){var item=e.target.closest('[data-ec-template]');if(item)selectTemplate(item.getAttribute('data-ec-template'))});
         one('#ecTemplatePlan').addEventListener('click',function(e){var copy=e.target.closest('[data-ec-copy-prompt]');if(copy){var text=copy.getAttribute('data-ec-copy-prompt')||'';if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(function(){copy.textContent='已复制'}).catch(function(){window.prompt('复制下面的提示词：',text)})}else{window.prompt('复制下面的提示词：',text)}return}if(e.target.closest('#ecApplyTemplate')){one('#ecRequest').value='按当前详情页模板生成每个模块，保持商品主体和原有文字不变';state.outputKind='detail';state.parsedOutput=null;syncOutputUi();var id=state.detailPlan&&state.detailPlan.template_id;if(id)selectTemplate(id);else parseRequest();}});
         one('#ecResults').addEventListener('click',function(e){var retry=e.target.closest('[data-ec-retry-output]');if(retry){e.preventDefault();retryOutput(retry.getAttribute('data-ec-retry-output'));return}var item=e.target.closest('[data-ec-view-output]');if(item)showViewer((state.run.outputs||[]).filter(function(o){return o.status==='succeeded'&&o.url}).findIndex(function(o){return o.id===item.getAttribute('data-ec-view-output')}))});
-        one('#ecProvider').onchange=renderModels;one('#ecRequest').oninput=function(){state.parsedOutput=null;clearTimeout(state.parseTimer);state.parseTimer=setTimeout(parseRequest,350)};
+         one('#ecProvider').onchange=renderModels;one('#ecRequest').oninput=function(){
+             var text=(one('#ecRequest').value||'').trim();
+             var detected=text.match(/视频|短视频|宣传片|广告片|商品片/)?'video':(text.match(/详情页|详情图|详情页面|详情/)?'detail':(text.match(/主图|白底图|商品图|产品图|电商图|套图/)?'main':''));
+             if(state.outputKind!=='auto'&&detected&&detected!==state.outputKind){state.outputKind='auto';state.detailPlan=null;syncOutputUi();renderModels();renderTemplates();renderTemplatePlan()}
+             state.parsedOutput=null;clearTimeout(state.parseTimer);state.parseTimer=setTimeout(parseRequest,350)
+         };
         one('#ecOutputChips').addEventListener('click',function(e){var chip=e.target.closest('[data-ec-output]');if(!chip)return;state.outputKind=chip.getAttribute('data-ec-output')||'auto';state.parsedOutput=null;if(state.outputKind!=='detail')state.detailPlan=null;syncOutputUi();renderModels();parseRequest();renderTemplates();renderTemplatePlan();if(state.outputKind==='detail')previewDefaultDetailTemplate();});
          one('#ecActionChips').addEventListener('click',function(e){var chip=e.target.closest('[data-ec-action]');if(!chip)return;state.action=chip.getAttribute('data-ec-action')||'create';all('.ec-action-chip').forEach(function(item){item.classList.toggle('active',item===chip)});analyzeSelection();});
         one('#ecDryRun').onclick=function(){startRun(true)};one('#ecStart').onclick=function(){startRun(false)};one('#ecPause').onclick=function(){action('pause')};one('#ecResume').onclick=function(){action('resume')};one('#ecCancel').onclick=function(){action('cancel')};one('#ecFactOnly').onclick=function(){action('fact-only')};one('#ecExport').onclick=exportRun;one('#ecViewDetail').onclick=function(){showViewer(0)};

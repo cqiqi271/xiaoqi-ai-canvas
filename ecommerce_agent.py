@@ -139,6 +139,16 @@ CREATIVE_ACTIONS = {
     "continue": "沿着当前画布的风格继续创作下一组内容",
 }
 
+# 每个详情模块都要有明确的视觉任务，避免只更换模块标题却生成近似画面。
+DETAIL_VISUAL_DIRECTIONS = {
+    "cover": "正面或三分之二正面英雄构图，商品占画面约 55% 至 70%，背景简洁，主体放在视觉中心并留出标题留白",
+    "selling-point": "商品处于真实使用场景中，采用中景或斜侧角度，用道具和光线表现核心卖点，主体放在画面一侧并留出另一侧排版空间",
+    "detail": "近距离微距细节构图，只突出一个关键材质、接口、纹理或工艺区域，背景虚化，商品整体不要占满画面",
+    "use": "生活化场景构图，采用横向或斜向视角展示商品如何被使用，加入合理环境和动作线索，但不添加无法确认的人物或配件",
+    "spec": "干净的信息展示构图，商品缩小放在一侧，另一侧保留大面积纯净留白用于参数排版，使用平视角度和均匀光线",
+    "after-sale": "品牌收尾构图，商品以小比例放在下方或角落，使用统一品牌氛围、柔和背景和充足留白，画面与首图明显不同",
+}
+
 
 class BrandPayload(BaseModel):
     name: str = Field(min_length=1, max_length=100)
@@ -206,8 +216,25 @@ def normalize_output_kind(value: str) -> str:
     return value if value in OUTPUT_KIND_INFO else "auto"
 
 
+def explicit_output_kind(text: str) -> str:
+    """Return a kind explicitly named by the request, ignoring stale UI state."""
+    text = str(text or "").strip()
+    if re.search(r"视频|短视频|宣传片|广告片|商品片", text, re.I):
+        return "video"
+    if re.search(r"详情页|详情图|详情页面|详情", text, re.I):
+        return "detail"
+    if re.search(r"主图|白底图|商品图|产品图|电商图|套图", text, re.I):
+        return "main"
+    return ""
+
+
 def detect_output_kind(text: str, requested: str = "auto") -> Dict[str, Any]:
     requested = normalize_output_kind(requested)
+    explicit = explicit_output_kind(text)
+    if explicit:
+        info = OUTPUT_KIND_INFO[explicit]
+        source = "text_override" if requested not in {"auto", explicit} else "text"
+        return {"kind": explicit, **info, "source": source}
     if requested != "auto":
         return {"kind": requested, **OUTPUT_KIND_INFO[requested], "source": "manual"}
     text = str(text or "").strip()
@@ -392,15 +419,26 @@ def _plans(run):
         module = detail_modules[index % len(detail_modules)] if detail_modules else {}
         module_name = module.get("module_name") or ""
         module_purpose = module.get("purpose") or ""
+        module_id = module.get("module_id") or ""
+        visual_direction = DETAIL_VISUAL_DIRECTIONS.get(
+            module_id,
+            (
+                "近景或斜侧角度，突出一个可确认的局部特点，背景适度虚化"
+                if "细节" in str(module.get("kind") or "") or "细节" in module_name
+                else "采用与其他图片明显不同的镜头角度、主体位置、背景层次和留白方式"
+            ),
+        )
         action_note = CREATIVE_ACTIONS.get(run.get("action") or "create", CREATIVE_ACTIONS["create"])
         prompt = (
             f"在无限画布中为{name}进行{action_note}，当前方向是{purpose}。{spec['focus']}。{brand_note}"
             + (f"这是详情页的“{module_name}”模块，目标是{module_purpose}。" if module_name else "")
+            + (f"本张专用视觉方案：{visual_direction}。" if module_name else "")
             + (
                 f"请制作一条约{run.get('video_duration') or 5}秒的商品展示短视频，"
                 f"画面比例为{run.get('aspect_ratio') or '16:9'}，镜头平稳，主体始终清楚可见。"
                 if media_kind == "video" else ""
             )
+            + f"这是第 {index + 1} 张，必须和同一套详情页的其他图片形成明显差异，不要复用其他图片的镜头、主体位置或背景。"
             + "严格保留参考商品的Logo、包装文字、颜色、比例、结构和数量，不重画有文字的包装正面，"
             "不得虚构配件。只生成干净背景、场景和自然光影，不生成中文、价格或水印，"
             "为后续继续编辑保留清晰留白。主体清晰，边缘自然，画面有商业创作质感。"
