@@ -550,6 +550,39 @@ def _normalize_intelligent_plan(raw, fallback, request_text="", quantity_overrid
         ("生活方式", "用新的生活场景强化使用价值", "更换环境和镜头高度，主体偏向画面一侧，背景层次不能重复", "生活场景"),
         ("品牌收束", "用简洁画面总结购买理由", "商品小比例配合品牌感背景和大面积留白，不能复用首图", "购买理由"),
     ]
+    # Do not let a model that repeats one generic card turn the whole set into
+    # near-identical images. Keep the first useful occurrence, then replace
+    # repeated directions with explainable, product-safe alternatives.
+    used_signatures = set()
+    seen_signatures = set()
+    for item in normalized:
+        signature = "|".join(str(item.get(key) or "").strip().lower() for key in ("module_name", "purpose", "visual_direction"))
+        if signature:
+            used_signatures.add(signature)
+    for position, item in enumerate(normalized):
+        signature = "|".join(str(item.get(key) or "").strip().lower() for key in ("module_name", "purpose", "visual_direction"))
+        if not signature or signature not in seen_signatures:
+            if signature:
+                seen_signatures.add(signature)
+            continue
+        index = position + 1
+        name, purpose, direction, hint = extra_directions[(index - 1) % len(extra_directions)]
+        replacement = {"index": index, "page": item.get("page") or index,
+                       "module_id": f"smart_distinct_{index}",
+                       "module_name": f"{name} · {index}", "purpose": purpose,
+                       "kind": "智能详情页模块", "text_hint": hint,
+                       "visual_direction": direction, "copy_hint": hint}
+        replacement_signature = "|".join(replacement[key].strip().lower() for key in ("module_name", "purpose", "visual_direction"))
+        while replacement_signature in used_signatures:
+            index += len(normalized)
+            name, purpose, direction, hint = extra_directions[(index - 1) % len(extra_directions)]
+            replacement["module_name"] = f"{name} · {position + 1}"
+            replacement["purpose"] = purpose
+            replacement["visual_direction"] = direction
+            replacement["text_hint"] = replacement["copy_hint"] = hint
+            replacement_signature = "|".join(replacement[key].strip().lower() for key in ("module_name", "purpose", "visual_direction"))
+        normalized[position] = replacement
+        used_signatures.add(replacement_signature)
     while len(normalized) < total:
         index = len(normalized) + 1
         name, purpose, direction, hint = extra_directions[(index - 1) % len(extra_directions)]
