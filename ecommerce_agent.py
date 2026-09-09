@@ -14,7 +14,7 @@ import uuid
 import zipfile
 from pathlib import Path
 from threading import RLock
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import requests
 from fastapi import HTTPException
@@ -185,6 +185,16 @@ class DetailPlanPayload(BaseModel):
     quantity_override: int = 0
 
 
+class IntelligentPlanPayload(BaseModel):
+    input_snapshot: List[Dict[str, Any]] = []
+    request_text: str = ""
+    output_kind: str = "detail"
+    quantity_override: int = 0
+    provider_id: str = ""
+    model: str = ""
+    dry_run: bool = False
+
+
 class RunPayload(BaseModel):
     canvas_id: str = ""
     node_id: str = ""
@@ -206,6 +216,7 @@ class RunPayload(BaseModel):
     template_id: str = ""
     template_name: str = ""
     detail_modules: List[Dict[str, Any]] = []
+    intelligent_plan: Dict[str, Any] = {}
     template_version: str = "1"
     output_kind: str = "auto"
     quantity_override: int = 0
@@ -233,13 +244,14 @@ def explicit_output_kind(text: str) -> str:
 
 def detect_output_kind(text: str, requested: str = "auto") -> Dict[str, Any]:
     requested = normalize_output_kind(requested)
+    # 面板里明确点击的输出类型优先；自然语言自动判断只在 auto 模式生效。
+    # 这样默认提示词残留“商品主图”时，用户仍然可以手动切换到详情页。
+    if requested != "auto":
+        return {"kind": requested, **OUTPUT_KIND_INFO[requested], "source": "manual"}
     explicit = explicit_output_kind(text)
     if explicit:
         info = OUTPUT_KIND_INFO[explicit]
-        source = "text_override" if requested not in {"auto", explicit} else "text"
-        return {"kind": explicit, **info, "source": source}
-    if requested != "auto":
-        return {"kind": requested, **OUTPUT_KIND_INFO[requested], "source": "manual"}
+        return {"kind": explicit, **info, "source": "text"}
     text = str(text or "").strip()
     # 明确写出视频时优先走视频接口，避免“视频主图”被当成图片任务。
     if re.search(r"视频|短视频|宣传片|广告片|商品片", text, re.I):
@@ -413,6 +425,193 @@ def _detail_plan(snapshot, request_text="", template_id="basic-detail", module_i
     }
 
 
+def _intelligent_quantity(request_text, output_kind="detail", quantity_override=0):
+    """Use the existing quantity rules, but let an intelligent plan choose a useful default."""
+    parsed = parse_quantity(request_text, ["canvas"], output_kind, quantity_override)
+    if parsed["quantity_source"] == "automatic":
+        text = str(request_text or "")
+        if output_kind == "detail":
+            # A detail page needs enough room for product, benefits, usage and proof.
+            # This is only the offline fallback; a successful model plan can choose its own count.
+            parsed["total_images"] = 8
+            parsed["page_count"] = parsed["total_images"]
+            parsed["images_per_page"] = 1
+            parsed["batches"] = [min(20, parsed["total_images"] - start) for start in range(0, parsed["total_images"], 20)]
+            parsed["warnings"] = ["没有写明数量，Agent 会根据商品资料智能规划详情页张数"]
+    return parsed
+
+
+def _local_intelligent_plan(snapshot, request_text="", output_kind="detail", quantity_override=0, reason=""):
+    """Explainable offline fallback: different product hints produce different modules."""
+    product = _product(snapshot)
+    text = (str(request_text or "") + " " + " ".join(product.get("known_facts") or [])).lower()
+    if any(word in text for word in ("衣", "服", "裙", "裤", "鞋", "包", "穿搭")):
+        category, focus = "服饰", ["版型与上身效果", "面料与细节", "多场景穿搭", "尺寸与选择建议"]
+    elif any(word in text for word in ("食", "茶", "咖啡", "零食", "食品", "饮")):
+        category, focus = "食品饮品", ["包装与口感氛围", "食用场景", "原料与工艺", "规格与食用建议"]
+    elif any(word in text for word in ("手机", "电脑", "耳机", "数码", "充电", "键盘")):
+        category, focus = "数码产品", ["功能场景", "接口与材质", "操作体验", "规格与兼容性"]
+    elif any(word in text for word in ("护肤", "洗发", "化妆", "香", "美妆")):
+        category, focus = "美妆个护", ["质地与使用方式", "成分或包装细节", "日常使用场景", "规格与注意事项"]
+    else:
+        category, focus = "商品", ["核心外观", "关键细节", "使用场景", "功能价值", "规格说明"]
+    quantity = _intelligent_quantity(request_text, output_kind, quantity_override)
+    if output_kind == "video":
+        return {"mode": "intelligent", "source": "offline_fallback", "fallback_reason": reason,
+                "product_profile": {**product, "category": category}, "total_images": quantity["total_images"],
+                "modules": [], "warnings": quantity["warnings"]}
+    total = quantity["total_images"]
+    base = [
+        ("hero", "首屏商品", "先让用户看清商品和第一印象", "正面或三分之二正面英雄构图，商品清晰突出，背景简洁并留出标题位置", "整体外观"),
+        ("benefit", "核心卖点", f"用画面说明{focus[0]}", "采用真实使用或功能场景，主体放在一侧，另一侧留出文案空间", focus[0]),
+        ("detail", "关键细节", f"放大展示{focus[1]}", "单独突出一个可确认的材质、结构或工艺细节，近景微距，背景适度虚化", focus[1]),
+        ("scene", "使用场景", f"让用户直观看到{focus[2]}", "用不同于首图的生活化场景和斜侧视角表达使用方式，不虚构配件", focus[2]),
+        ("experience", "体验价值", f"把{focus[3] if len(focus) > 3 else focus[0]}转成用户能理解的价值", "展示使用前后关系或操作过程，避免空泛口号，主体和背景层次明显", "使用体验"),
+        ("proof", "信息说明", f"清楚整理{focus[4] if len(focus) > 4 else '规格与注意事项'}", "商品缩小放在一侧，另一侧保留干净留白用于参数和注意事项排版", "规格与注意事项"),
+        ("detail_alt", "第二处细节", "补充一个与上一张不同的细节证据", "换用俯视或侧后方角度，只展示另一个真实可确认的细节，构图不能重复", "另一处细节"),
+        ("closing", "购买理由收尾", "把商品特点收束成清晰的购买理由", "品牌感收尾构图，商品小比例放置，使用统一氛围和充足留白，不能复用首图", "购买理由"),
+    ]
+    if total > len(base):
+        extra_directions = [
+            ("comparison", "使用前后或不同使用方式的对比", "采用左右对比构图，商品分别放在画面两侧，中间留出清晰的比较关系", "对比说明"),
+            ("material", "集中展示材质和触感", "使用低机位近距离镜头，让材质纹理成为主视觉，背景只保留少量陪衬", "材质触感"),
+            ("scale", "说明商品大小和使用尺度", "使用俯视或手持参照构图，保持比例真实，主体放在画面中心并留出尺寸说明空间", "尺寸和比例"),
+            ("care", "补充使用和保养提示", "用整洁的操作场景展示正确使用方式，镜头从侧面切入，避免和生活场景重复", "使用提示"),
+            ("detail_alt", "补充另一处可确认的细节", "使用与前面不同的微距角度，只突出一个真实细节，光线方向和背景层次明显变化", "另一处细节"),
+            ("closing_alt", "用简洁画面收束购买理由", "商品小比例放在视觉焦点，使用品牌感背景和大面积留白，不能复用首图构图", "购买理由"),
+        ]
+        base_count = len(base)
+        for i in range(base_count + 1, total + 1):
+            module_id, purpose, direction, hint = extra_directions[(i - base_count - 1) % len(extra_directions)]
+            base.append((f"{module_id}_{i}", f"{purpose} · {i}", purpose, direction, hint))
+    rows = []
+    for index, (module_id, name, purpose, direction, hint) in enumerate(base[:total], 1):
+        rows.append({
+            "index": index, "page": index, "module_id": module_id, "module_name": name,
+            "purpose": purpose, "kind": "智能详情页模块", "text_hint": hint,
+            "visual_direction": direction, "copy_hint": hint,
+        })
+    return {"mode": "intelligent", "source": "offline_fallback", "fallback_reason": reason,
+            "product_profile": {**product, "category": category}, "total_images": total,
+            "modules": rows, "warnings": quantity["warnings"],
+            "steps": ["读取选中的商品素材", "判断商品类型和可用信息", "按商品特点安排不同详情页模块", "为每张图生成独立构图方案"]}
+
+
+def _json_from_model_text(value):
+    text = str(value or "").strip()
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.I)
+    match = re.search(r"\{[\s\S]*\}", text)
+    if not match:
+        return None
+    try:
+        data = json.loads(match.group(0))
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _normalize_intelligent_plan(raw, fallback, request_text="", quantity_override=0):
+    if not isinstance(raw, dict):
+        return fallback
+    profile = raw.get("product_profile") or raw.get("product") or {}
+    if not isinstance(profile, dict):
+        profile = {}
+    merged_profile = {**fallback["product_profile"], **{key: value for key, value in profile.items() if value not in (None, "", [])}}
+    modules = raw.get("modules") or raw.get("detail_plan") or raw.get("plans") or []
+    if not isinstance(modules, list):
+        modules = []
+    normalized = []
+    for index, item in enumerate(modules[:200], 1):
+        if not isinstance(item, dict):
+            continue
+        normalized.append({
+            "index": index, "page": item.get("page") or index,
+            "module_id": str(item.get("module_id") or f"smart_{index}"),
+            "module_name": str(item.get("module_name") or item.get("name") or f"详情模块 {index}")[:80],
+            "purpose": str(item.get("purpose") or item.get("goal") or "展示商品特点")[:240],
+            "kind": str(item.get("kind") or "智能详情页模块")[:60],
+            "text_hint": str(item.get("text_hint") or item.get("copy_hint") or "清晰说明商品特点")[:160],
+            "visual_direction": str(item.get("visual_direction") or item.get("composition") or "使用与其他图片不同的镜头、主体位置和背景层次")[:500],
+            "copy_hint": str(item.get("copy_hint") or item.get("text_hint") or "")[:160],
+        })
+    if not normalized:
+        return fallback
+    explicit = parse_quantity(request_text, ["canvas"], "detail", quantity_override)
+    # Models sometimes return their own six-image ecommerce preset. That is
+    # valid only when the user explicitly asked for six; automatic planning
+    # must remain a real plan rather than silently inheriting that preset.
+    total = (explicit["total_images"] if explicit["quantity_source"] != "automatic"
+             else max(8, int(fallback.get("total_images") or 8), len(normalized)))
+    extra_directions = [
+        ("对比展示", "用前后或两种使用方式形成对比", "左右对比构图，商品位置和背景关系与前面不同，保留清晰文字留白", "对比说明"),
+        ("材质特写", "集中呈现一个真实材质细节", "低机位近景微距，只突出一处可确认细节，使用新的光线方向和景深", "材质触感"),
+        ("尺寸参照", "让用户理解商品大小和比例", "俯视或手持参照构图，比例真实，主体居中并留出尺寸说明空间", "尺寸和比例"),
+        ("正确使用", "补充实际操作和注意事项", "侧面操作场景，展示清楚的使用步骤，不虚构配件和功能", "使用提示"),
+        ("生活方式", "用新的生活场景强化使用价值", "更换环境和镜头高度，主体偏向画面一侧，背景层次不能重复", "生活场景"),
+        ("品牌收束", "用简洁画面总结购买理由", "商品小比例配合品牌感背景和大面积留白，不能复用首图", "购买理由"),
+    ]
+    while len(normalized) < total:
+        index = len(normalized) + 1
+        name, purpose, direction, hint = extra_directions[(index - 1) % len(extra_directions)]
+        normalized.append({"index": index, "page": index, "module_id": f"smart_{index}",
+                           "module_name": f"{name} · {index}", "purpose": purpose,
+                           "kind": "智能详情页模块", "text_hint": hint,
+                           "visual_direction": direction, "copy_hint": hint})
+    normalized = normalized[:total]
+    for index, item in enumerate(normalized, 1):
+        item["index"] = index
+        item["page"] = item.get("page") or index
+    return {**fallback, **raw, "mode": "intelligent", "source": "model",
+            "product_profile": merged_profile, "total_images": total, "modules": normalized,
+            "warnings": list(dict.fromkeys((fallback.get("warnings") or []) + (raw.get("warnings") or [])))}
+
+
+def _intelligent_prompt(snapshot, request_text, output_kind, quantity):
+    texts = [text for text in (_node_text(node) for node in snapshot) if text]
+    images = list(dict.fromkeys(url for node in snapshot for url in _node_images(node)))
+    return f"""你是电商视觉策划 Agent。请只根据用户选中的商品素材制定一套真正有差异的详情页方案，不能把所有图片都写成同一个模板。
+
+用户要求：{str(request_text or '根据商品素材智能规划一套详情页').strip()[:3000]}
+输出类型：{output_kind}
+当前规则识别的数量：{quantity.get('total_images')} 张；如果用户明确写了数量，必须严格使用这个数量。
+选中的文字资料：{json.dumps(texts[:20], ensure_ascii=False)}
+选中图片数量：{len(images)}
+
+请根据图片实际内容判断商品名称、类别、颜色、材质、包装、可确认卖点和不能确定的信息。
+请规划从首图、核心卖点、细节、使用场景、体验价值、信息说明到收尾的合理顺序，但要根据商品类型删掉不适合的模块，不能机械套用。
+每张图必须有不同的用途、镜头角度、主体位置、场景或排版留白。不要虚构参数、功效、配件、Logo 文字或商品结构。商品原图中的 Logo、包装文字、颜色、比例、结构和数量必须保留。
+
+只返回 JSON，不要 Markdown，格式如下：
+{{
+  "product_profile": {{"name": "", "category": "", "known_facts": [], "selling_points": [], "inferred_claims": [], "uncertainties": [], "protected_elements": []}},
+  "modules": [{{"module_name": "", "purpose": "", "kind": "", "visual_direction": "包含镜头、主体位置、场景和留白", "copy_hint": "只写可确认的文字方向"}}],
+  "warnings": []
+}}
+modules 数量必须等于最终生成张数。"""
+
+
+async def _build_intelligent_plan(snapshot, request_text, output_kind="detail", quantity_override=0,
+                                  provider_id="", model="", plan_chat=None):
+    fallback = _local_intelligent_plan(snapshot, request_text, output_kind, quantity_override)
+    if output_kind != "detail" or not plan_chat:
+        return fallback
+    quantity = _intelligent_quantity(request_text, output_kind, quantity_override)
+    try:
+        raw_text = await plan_chat(
+            prompt=_intelligent_prompt(snapshot, request_text, output_kind, quantity),
+            snapshot=snapshot, provider_id=provider_id, model=model,
+        )
+        raw = _json_from_model_text(raw_text)
+        planned = _normalize_intelligent_plan(raw, fallback, request_text, quantity_override)
+        if planned.get("source") == "model":
+            planned["fallback_reason"] = ""
+        return planned
+    except Exception as exc:
+        fallback["fallback_reason"] = str(exc)[:300]
+        fallback.setdefault("warnings", []).append("智能分析接口暂时不可用，已使用本地智能规划，不影响后续生成")
+        return fallback
+
+
 def _plans(run):
     purposes = ("方案一", "方案二", "方案三", "方案四", "细节优化", "构图变化", "场景变化", "继续创作")
     name = run["product_profile"]["name"]
@@ -435,7 +634,7 @@ def _plans(run):
         module_name = module.get("module_name") or ""
         module_purpose = module.get("purpose") or ""
         module_id = module.get("module_id") or ""
-        visual_direction = DETAIL_VISUAL_DIRECTIONS.get(
+        visual_direction = module.get("visual_direction") or DETAIL_VISUAL_DIRECTIONS.get(
             module_id,
             (
                 "近景或斜侧角度，突出一个可确认的局部特点，背景适度虚化"
@@ -444,6 +643,7 @@ def _plans(run):
             ),
         )
         action_note = CREATIVE_ACTIONS.get(run.get("action") or "create", CREATIVE_ACTIONS["create"])
+        purpose = module_purpose or (f"第 {index + 1} 张的独立视觉任务" if module_name else purpose)
         prompt = (
             f"在无限画布中为{name}进行{action_note}，当前方向是{purpose}。{spec['focus']}。{brand_note}"
             + (f"这是详情页的“{module_name}”模块，目标是{module_purpose}。" if module_name else "")
@@ -466,6 +666,7 @@ def _plans(run):
             "title": f"{name} · {module_name or purpose}", "subtitle": module_purpose or spec["focus"],
             "module_id": module.get("module_id") or "", "module_name": module_name,
             "module_kind": module.get("kind") or "", "text_hint": module.get("text_hint") or "",
+            "visual_direction": visual_direction, "copy_hint": module.get("copy_hint") or module.get("text_hint") or "",
             "media_kind": media_kind,
         })
     return result
@@ -473,7 +674,7 @@ def _plans(run):
 
 def register_ecommerce_agent(app, *, base_dir, submit_image_task, get_image_task,
                               cancel_image_task, public_providers, estimate_cost=None,
-                              submit_video_task=None):
+                              submit_video_task=None, plan_chat=None):
     def choose_state_root():
         """Prefer the project data directory, but keep first-run Agent usable in a read-only folder."""
         preferred = Path(base_dir) / "data" / "ecommerce"
@@ -814,14 +1015,29 @@ def register_ecommerce_agent(app, *, base_dir, submit_image_task, get_image_task
     @app.post("/api/ecommerce-agent/parse-request")
     async def parse_api(payload: ParsePayload):
         selected = [item for item in payload.platforms if item in PLATFORMS] or ["canvas"]
-        quantity = parse_quantity(payload.request_text, selected, payload.output_kind, payload.quantity_override)
         detected = detect_output_kind(payload.request_text, payload.output_kind)
+        quantity = (_intelligent_quantity(payload.request_text, detected["kind"], payload.quantity_override)
+                    if detected["kind"] == "detail" else
+                    parse_quantity(payload.request_text, selected, payload.output_kind, payload.quantity_override))
         return {"quantity": quantity, "output": detected,
                 "platforms": [{"id": item, **PLATFORMS[item]} for item in selected]}
 
     @app.post("/api/ecommerce-agent/analyze")
     async def analyze_api(payload: AnalyzePayload):
         return {"analysis": _agent_analysis(payload.input_snapshot, payload.request_text, payload.action)}
+
+    @app.post("/api/ecommerce-agent/intelligent-plan")
+    async def intelligent_plan_api(payload: IntelligentPlanPayload):
+        if not [item for item in payload.input_snapshot if isinstance(item, dict)]:
+            raise HTTPException(status_code=400, detail="请先在画布中选中商品图片或说明文字")
+        output_kind = normalize_output_kind(payload.output_kind)
+        if output_kind == "auto":
+            output_kind = detect_output_kind(payload.request_text, "auto")["kind"]
+        plan = await _build_intelligent_plan(
+            payload.input_snapshot, payload.request_text, output_kind, payload.quantity_override,
+            payload.provider_id, payload.model, None if payload.dry_run else plan_chat,
+        )
+        return {"plan": plan}
 
     @app.get("/api/ecommerce-agent/detail-templates")
     async def detail_templates_api():
@@ -849,6 +1065,11 @@ def register_ecommerce_agent(app, *, base_dir, submit_image_task, get_image_task
         if not snapshot:
             raise HTTPException(status_code=400, detail="请先在画布中选中商品图片或说明文字")
         product = _product(snapshot)
+        intelligent = payload.intelligent_plan if isinstance(payload.intelligent_plan, dict) else {}
+        intelligent_profile = intelligent.get("product_profile") if isinstance(intelligent.get("product_profile"), dict) else {}
+        if intelligent.get("mode") == "intelligent" and intelligent_profile:
+            product = {**product, **intelligent_profile,
+                       "reference_images": product.get("reference_images") or intelligent_profile.get("reference_images") or []}
         if not product["reference_images"]:
             raise HTTPException(status_code=400, detail="选中的节点里没有商品图片，请至少选择一张商品图")
         detected = detect_output_kind(payload.request_text, payload.output_kind)
@@ -866,16 +1087,30 @@ def register_ecommerce_agent(app, *, base_dir, submit_image_task, get_image_task
                 kind_label = "视频" if output_kind == "video" else "图片"
                 raise HTTPException(status_code=400, detail=f"所选 API 未配置“{payload.model}”{kind_label}模型，请刷新 API 设置后重试")
         quantity, now = parse_quantity(payload.request_text, selected_platforms, output_kind, payload.quantity_override), time.time()
-        detail = _detail_plan(snapshot, payload.request_text, payload.template_id,
-                              [item.get("module_id") for item in payload.detail_modules],
-                              payload.quantity_override) if payload.template_id else None
-        if detail and detail.get("total_images"):
+        intelligent_mode = (intelligent.get("mode") == "intelligent" and
+                            isinstance(intelligent.get("modules"), list) and
+                            bool(intelligent.get("modules")))
+        detail = (_detail_plan(snapshot, payload.request_text, payload.template_id,
+                               [item.get("module_id") for item in payload.detail_modules],
+                               payload.quantity_override)
+                  if payload.template_id and not intelligent_mode else None)
+        if intelligent_mode:
+            smart_modules = [item for item in intelligent.get("modules") if isinstance(item, dict)]
+            detail = {"template_id": "intelligent-plan", "template_name": "智能规划详情页",
+                      "template_description": "根据当前选中的商品素材和用户要求自动规划，每张图片有独立用途与构图。",
+                      "total_images": len(smart_modules), "modules": smart_modules}
+            quantity = {**quantity, "total_images": len(smart_modules),
+                        "page_count": len(smart_modules), "images_per_page": 1,
+                        "quantity_source": "intelligent_plan",
+                        "batches": [min(20, len(smart_modules) - start)
+                                    for start in range(0, len(smart_modules), 20)]}
+        elif detail and detail.get("total_images"):
             quantity = {**quantity, "total_images": detail["total_images"],
                         "page_count": detail["total_images"], "images_per_page": 1,
                         "quantity_source": "detail_template",
                         "batches": [min(20, detail["total_images"] - start)
                                     for start in range(0, detail["total_images"], 20)]}
-        if output_kind == "detail" and not payload.template_id:
+        elif output_kind == "detail" and not payload.template_id:
             detail = _detail_plan(snapshot, payload.request_text, "basic-detail", quantity_override=payload.quantity_override)
             quantity = {**quantity, "total_images": detail["total_images"],
                         "page_count": detail["total_images"], "images_per_page": 1,
@@ -897,6 +1132,7 @@ def register_ecommerce_agent(app, *, base_dir, submit_image_task, get_image_task
             "fidelity": payload.fidelity, "add_text": payload.add_text,
             "template_id": payload.template_id, "template_name": payload.template_name,
             "detail_modules": payload.detail_modules, "template_version": payload.template_version,
+            "intelligent_plan": intelligent,
             "max_retries": max(0, min(2, payload.max_retries)), "dry_run": payload.dry_run,
             **quantity, "product_profile": product, "status": "queued", "current_stage": "等待执行",
             "progress": 0.0, "estimated_cost": (estimated or {}).get("amount") if isinstance(estimated, dict) else None,

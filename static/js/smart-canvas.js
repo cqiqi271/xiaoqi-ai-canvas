@@ -1346,6 +1346,11 @@ function syncSelectionUi(){
     syncSmartSelectedImageResolution(world);
     syncRunButtonState();
     scheduleConnectionLayerRefresh();
+    // Keep the external Agent panel in sync with clicks, box selections and
+    // keyboard selection changes without exposing the whole canvas.
+    window.dispatchEvent(new CustomEvent('studio-selection-changed', {
+        detail:{ids:ids, image:selectedImage?.nodeId || ''}
+    }));
 }
 function isNodeSelected(id){
     return selectedId === id || selectedIds.includes(id);
@@ -19389,7 +19394,11 @@ function ecommerceSmartSelectedNodes(){
         }
         result.push(ecommerceSmartSnapshot(node));
     };
-    selectedNodeIds().forEach(id => include(nodes.find(node => node.id === id)));
+    // A media thumbnail can be selected even when the node selection array is
+    // temporarily empty. Include that node as a narrowly scoped fallback.
+    const ids = selectedNodeIds();
+    if(selectedImage?.nodeId && !ids.includes(selectedImage.nodeId)) ids.push(selectedImage.nodeId);
+    ids.forEach(id => include(nodes.find(node => node.id === id)));
     return result;
 }
 function ecommerceSmartAgent(run=null){
@@ -19441,6 +19450,7 @@ function applySmartEcommerceResults(run){
 }
 window.StudioEcommerceBridge={kind:'smart',getCanvasId:() => canvasId || '',getSelectedNodes:ecommerceSmartSelectedNodes,
     ensureAgentNode:ensureSmartEcommerceAgent,updateAgentNode:updateSmartEcommerceAgent,applyRunResults:applySmartEcommerceResults};
+window.dispatchEvent(new CustomEvent('studio-canvas-ready'));
 window.StudioCanvasTools = {
     kind:'smart',
     getCanvasId: () => canvasId || '',

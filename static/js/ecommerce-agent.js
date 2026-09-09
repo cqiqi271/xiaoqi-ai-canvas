@@ -1,10 +1,15 @@
 (function(){
     'use strict';
-    var state={platforms:[],providers:[],brands:[],templates:[],detailPlan:null,history:[],run:null,action:'create',outputKind:'auto',quantityMode:'auto',customQuantity:'',parsedOutput:null,timer:0,parseTimer:0,analysis:null,viewerIndex:0,viewerSources:[],viewerSourceIndex:0,viewerLoadToken:0,viewerTimer:0,initTimer:0,initAttempts:0,initialized:false};
+    var state={platforms:[],providers:[],brands:[],templates:[],detailPlan:null,intelligentPlan:null,intelligentPlanKey:'',detailMode:'intelligent',selectionSnapshot:[],history:[],run:null,action:'create',outputKind:'detail',quantityMode:'auto',customQuantity:'',parsedOutput:null,timer:0,parseTimer:0,parseSeq:0,analysis:null,viewerIndex:0,viewerSources:[],viewerSourceIndex:0,viewerLoadToken:0,viewerTimer:0,initTimer:0,initAttempts:0,initialized:false};
     function one(q,r){return (r||document).querySelector(q)}
     function all(q,r){return Array.prototype.slice.call((r||document).querySelectorAll(q))}
     function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
-    function bridge(){return window.StudioEcommerceBridge}
+    function bridge(){
+        // The smart canvas is loaded in an iframe and may publish its bridge
+        // after the panel script has already started. Always resolve the
+        // current bridge instead of caching an early undefined value.
+        return window.StudioEcommerceBridge || window.parent?.StudioEcommerceBridge || null;
+    }
     async function api(url,options){
         options=options||{};
         var response;
@@ -18,7 +23,19 @@
     function money(v){return v==null?'上游未提供':('¥'+Number(v||0).toFixed(4))}
     function dateText(v){if(!v)return '时间未知';var d=new Date(Number(v)*1000);return isNaN(d.getTime())?'时间未知':d.toLocaleString('zh-CN',{hour12:false})}
     function canvasId(){return bridge()&&bridge().getCanvasId?bridge().getCanvasId():''}
-    function selected(){return (bridge()&&bridge().getSelectedNodes?bridge().getSelectedNodes():[]).filter(function(n){return n.type!=='ecommerce-agent'&&n.type!=='smart-ecommerce-agent'})}
+    function selected(){
+        var current=bridge(),rows=[];
+        try{rows=current&&current.getSelectedNodes?current.getSelectedNodes():[]}catch(error){rows=[]}
+        return (Array.isArray(rows)?rows:[]).filter(function(n){return n&&n.type!=='ecommerce-agent'&&n.type!=='smart-ecommerce-agent'});
+    }
+    function notifySelectionChanged(){
+        if(!state.initialized)return;
+        // Selection changes happen outside this panel. Defer one frame so the
+        // canvas has finished updating its internal selection before reading it.
+        window.requestAnimationFrame(function(){
+            if(document.body.contains(one('#ecAgentPanel')))selectedPreview();
+        });
+    }
     function html(){
         return [
         '<div id="ecAgentBackdrop" class="ec-agent-backdrop"></div>',
@@ -26,8 +43,8 @@
         '<header class="ec-agent-head"><div class="ec-agent-mark"><i data-lucide="bot"></i></div><div><h2>画布创作 Agent</h2><p>选中素材，用一句话继续创作，结果直接回到画布</p></div><button class="ec-agent-close" id="ecClose" title="关闭"><i data-lucide="x"></i></button></header>',
         '<div class="ec-agent-scroll">',
         '<section class="ec-section"><div class="ec-section-head"><i data-lucide="scan-search"></i><strong>选中素材</strong><span id="ecSelectedCount">0 个节点</span></div><div id="ecHealth" class="ec-health" role="status">正在检查 Agent 服务...</div><div id="ecSelected" class="ec-selected"></div><div class="ec-actions"><button class="ec-btn" id="ecRefreshSelection">刷新选中内容</button><button class="ec-btn" id="ecCreateNode">放入 Agent 节点</button><button class="ec-btn primary" id="ecAnalyze">分析并规划</button></div><p class="ec-hint">Agent 只读取当前选中的图片、文字和参考素材，不会混入画布里的其他内容。</p><div id="ecAnalysis" class="ec-analysis"><div class="ec-empty">点击“分析并规划”，先查看 Agent 准备怎么做。</div></div></section>',
-        '<section class="ec-section"><div class="ec-section-head"><i data-lucide="wand-sparkles"></i><strong>创作指令</strong><span>只读取当前选中内容</span></div><div id="ecOutputChips" class="ec-output-chips"><button type="button" class="ec-output-chip active" data-ec-output="auto">自动判断</button><button type="button" class="ec-output-chip" data-ec-output="detail">一套详情页</button><button type="button" class="ec-output-chip" data-ec-output="main">一套商品主图</button><button type="button" class="ec-output-chip" data-ec-output="video">一条商品视频</button></div><div id="ecActionChips" class="ec-action-chips"><button type="button" class="ec-action-chip active" data-ec-action="create">开始创作</button><button type="button" class="ec-action-chip" data-ec-action="variation">生成变体</button><button type="button" class="ec-action-chip" data-ec-action="background">换背景</button><button type="button" class="ec-action-chip" data-ec-action="expand">扩展画面</button><button type="button" class="ec-action-chip" data-ec-action="refine">局部优化</button><button type="button" class="ec-action-chip" data-ec-action="continue">继续创作</button></div><label class="ec-field"><span>用大白话告诉 Agent 想做什么</span><textarea id="ecRequest" placeholder="例如：帮我把这个商品做成一套详情页，突出材质和使用场景">帮我做一套风格统一的商品主图，保持商品外观不变</textarea></label><div class="ec-quantity"><div class="ec-quantity-head"><strong>生成数量</strong><span>可选或自定义，最多 200 张</span></div><div id="ecQuantityChips" class="ec-quantity-chips"><button type="button" class="ec-quantity-chip active" data-ec-quantity="auto">自动规划</button><button type="button" class="ec-quantity-chip" data-ec-quantity="4">4 张</button><button type="button" class="ec-quantity-chip" data-ec-quantity="6">6 张</button><button type="button" class="ec-quantity-chip" data-ec-quantity="9">9 张</button><button type="button" class="ec-quantity-chip" data-ec-quantity="12">12 张</button><button type="button" class="ec-quantity-chip" data-ec-quantity="custom">自定义</button></div><label id="ecCustomQuantityWrap" class="ec-custom-quantity" hidden><span>输入数量</span><input id="ecCustomQuantity" type="number" min="1" max="200" step="1" placeholder="例如 15"><em>手动数量会覆盖提示词里的数量，点“自动规划”恢复自动识别。</em></label></div><div id="ecParseSummary" class="ec-parse-summary"></div><div id="ecWarnings"></div>',
-        '<section class="ec-section ec-template-section"><div class="ec-section-head"><i data-lucide="layout-template"></i><strong>详情页模板</strong><span>先预览结构，不会扣费</span></div><div id="ecTemplates" class="ec-templates"><div class="ec-empty">正在读取模板...</div></div><div id="ecTemplatePlan" class="ec-template-plan"><div class="ec-empty">选择一个模板后，会显示详情页模块顺序。</div></div></section>',
+        '<section class="ec-section"><div class="ec-section-head"><i data-lucide="wand-sparkles"></i><strong>创作指令</strong><span>只读取当前选中内容</span></div><div id="ecOutputChips" class="ec-output-chips"><button type="button" class="ec-output-chip" data-ec-output="auto">自动判断</button><button type="button" class="ec-output-chip active" data-ec-output="detail">一套详情页</button><button type="button" class="ec-output-chip" data-ec-output="main">一套商品主图</button><button type="button" class="ec-output-chip" data-ec-output="video">一条商品视频</button></div><div id="ecActionChips" class="ec-action-chips"><button type="button" class="ec-action-chip active" data-ec-action="create">开始创作</button><button type="button" class="ec-action-chip" data-ec-action="variation">生成变体</button><button type="button" class="ec-action-chip" data-ec-action="background">换背景</button><button type="button" class="ec-action-chip" data-ec-action="expand">扩展画面</button><button type="button" class="ec-action-chip" data-ec-action="refine">局部优化</button><button type="button" class="ec-action-chip" data-ec-action="continue">继续创作</button></div><label class="ec-field"><span>用大白话告诉 Agent 想做什么</span><textarea id="ecRequest" placeholder="例如：帮我把这个商品做成一套详情页，突出材质和使用场景">帮我根据选中的商品素材智能生成一套详情页，保持商品外观不变</textarea></label><div class="ec-quantity"><div class="ec-quantity-head"><strong>生成数量</strong><span>可选或自定义，最多 200 张</span></div><div id="ecQuantityChips" class="ec-quantity-chips"><button type="button" class="ec-quantity-chip active" data-ec-quantity="auto">自动规划</button><button type="button" class="ec-quantity-chip" data-ec-quantity="4">4 张</button><button type="button" class="ec-quantity-chip" data-ec-quantity="6">6 张</button><button type="button" class="ec-quantity-chip" data-ec-quantity="9">9 张</button><button type="button" class="ec-quantity-chip" data-ec-quantity="12">12 张</button><button type="button" class="ec-quantity-chip" data-ec-quantity="custom">自定义</button></div><label id="ecCustomQuantityWrap" class="ec-custom-quantity" hidden><span>输入数量</span><input id="ecCustomQuantity" type="number" min="1" max="200" step="1" placeholder="例如 15"><em>手动数量会覆盖提示词里的数量，点“自动规划”恢复自动识别。</em></label></div><div id="ecParseSummary" class="ec-parse-summary"></div><div id="ecWarnings"></div>',
+        '<section class="ec-section ec-template-section"><div class="ec-section-head"><i data-lucide="layout-template"></i><strong>详情页规划方式</strong><span>先规划结构，不会扣费</span></div><div id="ecDetailModes" class="ec-detail-modes"><button type="button" class="ec-detail-mode active" data-ec-detail-mode="intelligent">智能规划详情页</button><button type="button" class="ec-detail-mode" data-ec-detail-mode="template">手动选择模板</button></div><div id="ecSmartPlanHint" class="ec-smart-plan-hint">智能模式会先读取选中的商品图片和文字，再按商品特点安排不同模块。没有写数量时，也不会固定套用 6 张。</div><div id="ecTemplates" class="ec-templates" hidden><div class="ec-empty">正在读取模板...</div></div><div id="ecTemplatePlan" class="ec-template-plan"><div class="ec-empty">点击上面的“分析并规划”，Agent 会先生成商品档案和详情页方案。</div></div></section>',
         '<div class="ec-row"><label class="ec-field"><span id="ecProviderLabel">图片 API</span><select id="ecProvider"></select></label><label class="ec-field"><span id="ecModelLabel">图片模型</span><select id="ecModel"></select></label></div><div id="ecVideoOptions" class="ec-video-options" hidden><label class="ec-field"><span>视频时长（秒）</span><input id="ecVideoDuration" type="number" min="1" max="60" value="5"></label><label class="ec-field"><span>画面比例</span><select id="ecAspectRatio"><option>16:9</option><option>9:16</option><option>1:1</option><option>4:3</option><option>3:4</option></select></label></div><label class="ec-check" style="margin-top:8px"><input id="ecAddText" type="checkbox" checked>保留可编辑文字层</label><label class="ec-check"><input id="ecStrictFidelity" type="checkbox" checked>严格保留主体、Logo 和原有文字</label></section>',
         '<section class="ec-section"><div class="ec-section-head"><i data-lucide="workflow"></i><strong>执行</strong><span>结果自动放回画布</span></div><div class="ec-actions"><button class="ec-btn" id="ecDryRun">预演方案（不扣费）</button><button class="ec-btn primary" id="ecStart">开始生成</button><button class="ec-btn" id="ecPause" disabled>暂停</button><button class="ec-btn" id="ecResume" disabled>继续</button><button class="ec-btn danger" id="ecCancel" disabled>取消</button></div></section>',
         '<section class="ec-section"><div class="ec-section-head"><i data-lucide="history"></i><strong>最近运行</strong><span>重新打开仍可查看</span></div><div id="ecHistory" class="ec-history"><div class="ec-empty">正在读取运行记录...</div></div></section>',
@@ -39,6 +56,7 @@
     }
     function selectedPreview(){
         var rows=selected();
+        state.selectionSnapshot=rows.map(function(node){return JSON.parse(JSON.stringify(node))});
         one('#ecSelectedCount').textContent=rows.length+' 个节点';
         one('#ecSelected').innerHTML=rows.length?rows.slice(0,8).map(function(node){
             var url=node.url||(node.images&&node.images[0]&&node.images[0].url)||'';
@@ -54,12 +72,17 @@
         if(/主图|白底图|商品图|产品图|电商图|套图/i.test(text))return 'main';
         return '';
     }
-    function requestedOutputKind(){return explicitOutputKind(one('#ecRequest')&&one('#ecRequest').value)||activeOutputKind()}
+    function requestedOutputKind(){
+        return state.outputKind!=='auto'?state.outputKind:(explicitOutputKind(one('#ecRequest')&&one('#ecRequest').value)||activeOutputKind());
+    }
     function quantityOverride(){
         if(state.quantityMode==='auto')return 0;
         var value=state.quantityMode==='custom'?Number(one('#ecCustomQuantity')&&one('#ecCustomQuantity').value):Number(state.quantityMode);
         if(!Number.isFinite(value)||value<1)return 0;
         return Math.max(1,Math.min(200,Math.round(value)));
+    }
+    function intelligentPlanKey(source){
+        return JSON.stringify({ids:(source||[]).map(function(item){return item&&item.id||''}),request:one('#ecRequest')&&one('#ecRequest').value||'',quantity:quantityOverride(),provider:one('#ecProvider')&&one('#ecProvider').value||'',output:requestedOutputKind()});
     }
     function syncQuantityUi(){
         all('.ec-quantity-chip').forEach(function(item){item.classList.toggle('active',item.getAttribute('data-ec-quantity')===String(state.quantityMode))});
@@ -108,20 +131,38 @@
         if(!p){target.innerHTML='<div class="ec-empty">选择一个模板后，会显示详情页模块顺序。</div>';return}
         target.innerHTML='<div class="ec-template-plan-head"><strong>'+esc(p.template_name)+'</strong><span>'+Number(p.total_images)+' 张 · 不扣费预览</span></div><p class="ec-template-description">'+esc(p.template_description||'')+'</p><div class="ec-module-list">'+(p.modules||[]).map(function(m,i){return '<div class="ec-module-item ec-module-item-rich"><b>'+String(i+1).padStart(2,'0')+'</b><span><strong>'+esc(m.module_name)+'</strong><small>'+esc(m.kind)+' · '+esc(m.purpose)+'</small><em>'+esc(m.text_hint)+'</em><details><summary>查看自动提示词</summary><pre>'+esc(m.prompt||'正在生成提示词...')+'</pre><button type="button" class="ec-copy-prompt" data-ec-copy-prompt="'+esc(m.prompt||'')+'">复制提示词</button></details></span></div>'}).join('')+'</div><div class="ec-template-plan-actions"><button type="button" class="ec-btn primary" id="ecApplyTemplate">应用这个模板</button><span>应用后会按模块逐张生成，旧图片不会被覆盖。</span></div>';
     }
+    function syncDetailModeUi(){
+        var smart=state.detailMode==='intelligent';
+        all('.ec-detail-mode').forEach(function(item){item.classList.toggle('active',item.getAttribute('data-ec-detail-mode')===state.detailMode)});
+        var templates=one('#ecTemplates'),hint=one('#ecSmartPlanHint');
+        if(templates)templates.hidden=smart;
+        if(hint)hint.textContent=smart?'智能模式会先读取选中的商品图片和文字，再按商品特点安排不同模块。没有写数量时，也不会固定套用 6 张。':'手动模板只在你主动选择后使用，适合你已经确定详情页结构的情况。';
+    }
+    function renderIntelligentPlan(){
+        var target=one('#ecTemplatePlan');if(!target)return;var p=state.intelligentPlan;
+        if(!p){target.innerHTML='<div class="ec-empty">点击上面的“分析并规划”，Agent 会先生成商品档案和详情页方案。</div>';return}
+        var profile=p.product_profile||{};
+        target.innerHTML='<div class="ec-template-plan-head"><strong>智能规划详情页</strong><span>'+Number(p.total_images||0)+' 张 · '+(p.source==='model'?'模型分析':'本地智能回退')+'</span></div><div class="ec-smart-profile"><b>'+esc(profile.name||'未命名商品')+'</b><span>'+esc(profile.category||'商品')+'</span><small>已知信息 '+Number((profile.known_facts||[]).length)+' 条 · 参考图 '+Number(profile.source_image_count||0)+' 张</small></div><p class="ec-template-description">Agent 会按商品实际特点安排每一张图，避免所有图片重复同一个模板。</p><div class="ec-module-list">'+(p.modules||[]).map(function(m,i){return '<div class="ec-module-item ec-module-item-rich"><b>'+String(i+1).padStart(2,'0')+'</b><span><strong>'+esc(m.module_name||('详情模块 '+(i+1)))+'</strong><small>'+esc(m.kind||'智能详情页模块')+' · '+esc(m.purpose||'展示商品特点')+'</small><em>构图：'+esc(m.visual_direction||'使用不同镜头、主体位置和场景')+'</em><em>文案方向：'+esc(m.copy_hint||m.text_hint||'清晰说明可确认的商品特点')+'</em></span></div>'}).join('')+'</div><div class="ec-template-plan-actions"><button type="button" class="ec-btn primary" id="ecApplySmartPlan">按这套智能方案生成</button><span>方案只读取当前选中的素材，旧图片不会被覆盖。</span></div>'+(p.fallback_reason?'<div class="ec-warning">智能分析暂时不可用，已使用本地智能规划：'+esc(p.fallback_reason)+'</div>':'');
+    }
+    function setDetailMode(mode){
+        state.detailMode=mode==='template'?'template':'intelligent';state.detailPlan=null;state.intelligentPlan=null;syncDetailModeUi();
+        if(activeOutputKind()==='detail'&&state.detailMode==='template')previewDefaultDetailTemplate();
+        else renderIntelligentPlan();
+    }
     function selectTemplate(id){
         var source=selected();if(!source.length){one('#ecTemplatePlan').innerHTML='<div class="ec-warning">请先在画布中选中商品图片，再选择详情页模板。</div>';return}
-        state.outputKind='detail';syncOutputUi();renderModels();
+        state.outputKind='detail';state.detailMode='template';syncOutputUi();syncDetailModeUi();renderModels();
         api('/api/ecommerce-agent/detail-plan',{method:'POST',body:JSON.stringify({input_snapshot:source,request_text:one('#ecRequest').value,template_id:id,quantity_override:quantityOverride()})}).then(function(data){state.detailPlan=data.plan||null;renderTemplates();renderTemplatePlan();parseRequest()}).catch(function(e){one('#ecTemplatePlan').innerHTML='<div class="ec-warning">模板预览失败：'+esc(e.message)+'</div>'});
     }
     function previewDefaultDetailTemplate(){
-        if(activeOutputKind()!=='detail'||state.detailPlan)return;
+        if(activeOutputKind()!=='detail'||state.detailMode!=='template'||state.detailPlan)return;
         var source=selected();if(!source.length)return;
         api('/api/ecommerce-agent/detail-plan',{method:'POST',body:JSON.stringify({input_snapshot:source,request_text:one('#ecRequest').value,template_id:'basic-detail',quantity_override:quantityOverride()})}).then(function(data){
             state.detailPlan=data.plan||null;renderTemplates();renderTemplatePlan();
         }).catch(function(e){console.warn('基础详情页预览失败',e)});
     }
     function renderBase(){
-        syncOutputUi();syncQuantityUi();renderModels();
+        syncOutputUi();syncQuantityUi();syncDetailModeUi();renderModels();
     }
     async function loadBase(){
         var results=await Promise.all([api('/api/ecommerce-agent/platforms'),api('/api/ecommerce-agent/detail-templates')]);
@@ -170,40 +211,64 @@
         if(['succeeded','partial','failed','cancelled'].indexOf(run.status)<0)poll();
     }
     async function parseRequest(){
+        var requestSeq=++state.parseSeq;
         try{
             var data=await api('/api/ecommerce-agent/parse-request',{method:'POST',body:JSON.stringify({request_text:one('#ecRequest').value,platforms:platformIds(),output_kind:state.outputKind,quantity_override:quantityOverride()})});
+            if(requestSeq!==state.parseSeq)return;
             var q=data.quantity||{};
             state.parsedOutput=data.output||null;syncOutputUi();renderModels();
             if(q.output_kind!=='detail'&&state.outputKind==='auto')state.detailPlan=null;
             var unit=q.output_kind==='video'?'条':'张';
             if(state.outputKind==='auto'&&q.output_kind!==activeOutputKind()){state.detailPlan=null;syncOutputUi();renderTemplates();renderTemplatePlan()}
-            one('#ecParseSummary').innerHTML='<span class="ec-chip">'+esc(outputLabel())+' <strong>'+Number(q.total_images||0)+' '+unit+'</strong></span><span class="ec-chip">任务批次 <strong>'+Number((q.batches||[]).length||1)+'</strong></span>'+(q.output_kind==='detail'&&!state.detailPlan?'<span class="ec-chip">将自动套用 <strong>基础详情页</strong></span>':'');
+            var plannedCount=(q.output_kind==='detail'&&state.detailMode==='intelligent'&&state.intelligentPlan)?Number(state.intelligentPlan.total_images||q.total_images||0):Number(q.total_images||0);
+            var plannedBatches=Math.max(1,Math.ceil(plannedCount/20));
+            one('#ecParseSummary').innerHTML='<span class="ec-chip">'+esc(outputLabel())+' <strong>'+plannedCount+' '+unit+'</strong></span><span class="ec-chip">任务批次 <strong>'+plannedBatches+'</strong></span>'+(q.output_kind==='detail'&&state.detailMode==='intelligent'&&!state.intelligentPlan?'<span class="ec-chip">等待 <strong>智能规划</strong></span>':'')+(q.output_kind==='detail'&&state.detailMode==='template'&&!state.detailPlan?'<span class="ec-chip">将自动套用 <strong>基础详情页</strong></span>':'');
             one('#ecWarnings').innerHTML=(q.warnings||[]).map(function(w){return '<div class="ec-warning">'+esc(w)+'</div>'}).join('');
-            if(q.output_kind==='detail'&&!state.detailPlan)previewDefaultDetailTemplate();
+            if(q.output_kind==='detail'&&state.detailMode==='template'&&!state.detailPlan)previewDefaultDetailTemplate();
         }catch(e){one('#ecWarnings').innerHTML='<div class="ec-warning">'+esc(e.message)+'</div>'}
     }
-    async function analyzeSelection(){
+    async function analyzeSelection(dryRun){
         var source=selected();
+        state.selectionSnapshot=source.map(function(node){return JSON.parse(JSON.stringify(node))});
+        selectedPreview();
+        source=state.selectionSnapshot;
         if(!source.length){one('#ecAnalysis').innerHTML='<div class="ec-warning">请先在画布中选中图片、文字或参考素材。</div>';return false}
         try{
             var data=await api('/api/ecommerce-agent/analyze',{method:'POST',body:JSON.stringify({input_snapshot:source,request_text:one('#ecRequest').value,action:state.action})});
             state.analysis=data.analysis||{};
             var a=state.analysis;
-            one('#ecAnalysis').innerHTML='<div class="ec-analysis-summary"><span class="ec-chip">素材 <strong>'+Number(a.source_count||0)+'</strong></span><span class="ec-chip">图片 <strong>'+Number(a.image_count||0)+'</strong></span><span class="ec-chip">文字 <strong>'+Number(a.text_count||0)+'</strong></span></div><strong class="ec-analysis-title">建议执行步骤</strong><ol>'+((a.steps||[]).map(function(step){return '<li>'+esc(step)+'</li>'}).join(''))+'</ol>'+((a.known_text||[]).length?'<div class="ec-analysis-known"><strong>已读到的文字</strong><p>'+a.known_text.map(esc).join('<br>')+'</p></div>':'')+((a.warnings||[]).map(function(w){return '<div class="ec-warning">'+esc(w)+'</div>'}).join(''));
+            one('#ecAnalysis').innerHTML='<div class="ec-analysis-summary"><span class="ec-chip">素材 <strong>'+Number(a.source_count||0)+'</strong></span><span class="ec-chip">图片 <strong>'+Number(a.image_count||0)+'</strong></span><span class="ec-chip">文字 <strong>'+Number(a.text_count||0)+'</strong></span></div><strong class="ec-analysis-title">已完成基础检查</strong><ol>'+((a.steps||[]).map(function(step){return '<li>'+esc(step)+'</li>'}).join(''))+'</ol>'+((a.known_text||[]).length?'<div class="ec-analysis-known"><strong>已读到的文字</strong><p>'+a.known_text.map(esc).join('<br>')+'</p></div>':'')+((a.warnings||[]).map(function(w){return '<div class="ec-warning">'+esc(w)+'</div>'}).join(''));
+            if(activeOutputKind()==='detail'&&state.detailMode==='intelligent'){
+                var planKey=intelligentPlanKey(source);
+                if(state.intelligentPlan&&state.intelligentPlanKey===planKey){renderIntelligentPlan();return Boolean(a.ready)}
+                one('#ecTemplatePlan').innerHTML='<div class="ec-empty">正在让已配置的聊天/视觉模型分析商品并规划每一张图...</div>';
+                try{
+                    var smart=await api('/api/ecommerce-agent/intelligent-plan',{method:'POST',body:JSON.stringify({input_snapshot:source,request_text:one('#ecRequest').value,output_kind:'detail',quantity_override:quantityOverride(),provider_id:one('#ecProvider').value,model:one('#ecModel').value,dry_run:Boolean(dryRun)})});
+                    state.intelligentPlan=smart.plan||null;state.intelligentPlanKey=planKey;renderIntelligentPlan();parseRequest();
+                }catch(planError){
+                    try{
+                        var offline=await api('/api/ecommerce-agent/intelligent-plan',{method:'POST',body:JSON.stringify({input_snapshot:source,request_text:one('#ecRequest').value,output_kind:'detail',quantity_override:quantityOverride(),provider_id:'',model:'',dry_run:true})});
+                        state.intelligentPlan=offline.plan||null;state.intelligentPlanKey=planKey;renderIntelligentPlan();parseRequest();
+                    }catch(offlineError){
+                        one('#ecTemplatePlan').innerHTML='<div class="ec-warning">智能规划暂时无法连接：'+esc(offlineError.message||planError.message)+'。请确认本地服务已启动后重试。</div>';return false;
+                    }
+                }
+            }
             return Boolean(a.ready);
         }catch(e){one('#ecAnalysis').innerHTML='<div class="ec-warning">分析失败：'+esc(e.message)+'</div>';return false}
     }
     function ensureAgent(){if(!bridge())throw new Error('当前画布尚未准备好');return bridge().ensureAgentNode?bridge().ensureAgentNode():null}
     function makePayload(dry){
-        var source=selected();if(!source.length)throw new Error('请先在画布里选中图片、文字或参考素材');
+        var source=(state.selectionSnapshot||[]).length?state.selectionSnapshot:selected();
+        if(!source.length)throw new Error('请先在画布里选中图片、文字或参考素材');
         var agent=ensureAgent();
-        var outputKind=requestedOutputKind(),detail=outputKind==='detail'?state.detailPlan:null;
-        return {canvas_id:bridge().getCanvasId?bridge().getCanvasId():'',node_id:agent&&agent.id||'',canvas_kind:bridge().kind||'classic',selected_node_ids:source.map(function(n){return n.id}),input_snapshot:source,brand_profile_id:'',platforms:['canvas'],provider_id:one('#ecProvider').value,model:one('#ecModel').value,request_text:one('#ecRequest').value,action:state.action,size:'',quality:'auto',fidelity:one('#ecStrictFidelity')&&one('#ecStrictFidelity').checked?'strict':'balanced',add_text:one('#ecAddText').checked,max_retries:2,dry_run:dry,template_id:detail&&detail.template_id||'',template_name:detail&&detail.template_name||'',detail_modules:detail&&detail.modules||[],template_version:'1',output_kind:outputKind,quantity_override:quantityOverride(),video_duration:Number(one('#ecVideoDuration').value||5),aspect_ratio:one('#ecAspectRatio').value||'16:9',resolution:''};
+        var outputKind=requestedOutputKind(),detail=outputKind==='detail'?(state.detailMode==='intelligent'?state.intelligentPlan:state.detailPlan):null;
+        return {canvas_id:bridge().getCanvasId?bridge().getCanvasId():'',node_id:agent&&agent.id||'',canvas_kind:bridge().kind||'classic',selected_node_ids:source.map(function(n){return n.id}),input_snapshot:source,brand_profile_id:'',platforms:['canvas'],provider_id:one('#ecProvider').value,model:one('#ecModel').value,request_text:one('#ecRequest').value,action:state.action,size:'',quality:'auto',fidelity:one('#ecStrictFidelity')&&one('#ecStrictFidelity').checked?'strict':'balanced',add_text:one('#ecAddText').checked,max_retries:2,dry_run:dry,template_id:state.detailMode==='template'?(detail&&detail.template_id||''):((detail&&detail.mode==='intelligent')?'intelligent-plan':''),template_name:detail&&detail.template_name||((detail&&detail.mode==='intelligent')?'智能规划详情页':''),detail_modules:detail&&detail.modules||[],intelligent_plan:detail&&detail.mode==='intelligent'?detail:{},template_version:'1',output_kind:outputKind,quantity_override:quantityOverride(),video_duration:Number(one('#ecVideoDuration').value||5),aspect_ratio:one('#ecAspectRatio').value||'16:9',resolution:''};
     }
     async function startRun(dry){
         try{
          if(state.quantityMode==='custom'&&!quantityOverride()){alert('请先输入自定义生成数量（1 到 200 张）。');return;}
-         if(!await analyzeSelection())return;
+         if(!await analyzeSelection(dry))return;
          if(!dry&&!confirm('将按当前数量向选定 API 提交图片任务，可能产生费用。确认开始吗？'))return;
             var data=await api('/api/ecommerce-agent/runs',{method:'POST',body:JSON.stringify(makePayload(dry))});
             state.run=data.run;state.history=[state.run].concat(state.history.filter(function(item){return item.id!==state.run.id}));renderHistory();updateRun();poll();
@@ -291,7 +356,8 @@
         one('#ecClose').onclick=close;one('#ecAgentBackdrop').onclick=close;one('#ecRefreshSelection').onclick=function(){selectedPreview();analyzeSelection()};one('#ecCreateNode').onclick=function(){ensureAgent();selectedPreview()};one('#ecAnalyze').onclick=analyzeSelection;
         one('#ecHistory').addEventListener('click',function(e){var item=e.target.closest('[data-ec-history-id]');if(item)chooseHistory(item.getAttribute('data-ec-history-id'))});
         one('#ecTemplates').addEventListener('click',function(e){var item=e.target.closest('[data-ec-template]');if(item)selectTemplate(item.getAttribute('data-ec-template'))});
-        one('#ecTemplatePlan').addEventListener('click',function(e){var copy=e.target.closest('[data-ec-copy-prompt]');if(copy){var text=copy.getAttribute('data-ec-copy-prompt')||'';if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(function(){copy.textContent='已复制'}).catch(function(){window.prompt('复制下面的提示词：',text)})}else{window.prompt('复制下面的提示词：',text)}return}if(e.target.closest('#ecApplyTemplate')){one('#ecRequest').value='按当前详情页模板生成每个模块，保持商品主体和原有文字不变';state.outputKind='detail';state.parsedOutput=null;syncOutputUi();var id=state.detailPlan&&state.detailPlan.template_id;if(id)selectTemplate(id);else parseRequest();}});
+        one('#ecDetailModes').addEventListener('click',function(e){var mode=e.target.closest('[data-ec-detail-mode]');if(mode)setDetailMode(mode.getAttribute('data-ec-detail-mode'))});
+        one('#ecTemplatePlan').addEventListener('click',function(e){var copy=e.target.closest('[data-ec-copy-prompt]');if(copy){var text=copy.getAttribute('data-ec-copy-prompt')||'';if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(function(){copy.textContent='已复制'}).catch(function(){window.prompt('复制下面的提示词：',text)})}else{window.prompt('复制下面的提示词：',text)}return}if(e.target.closest('#ecApplyTemplate')){one('#ecRequest').value='按当前详情页模板生成每个模块，保持商品主体和原有文字不变';state.outputKind='detail';state.detailMode='template';state.parsedOutput=null;syncOutputUi();var id=state.detailPlan&&state.detailPlan.template_id;if(id)selectTemplate(id);else parseRequest();return}if(e.target.closest('#ecApplySmartPlan')){state.outputKind='detail';state.detailMode='intelligent';one('#ecRequest').value=one('#ecRequest').value.trim()||'根据商品素材智能生成一套详情页';state.parsedOutput=null;syncOutputUi();renderIntelligentPlan();parseRequest();}});
         one('#ecResults').addEventListener('click',function(e){var retry=e.target.closest('[data-ec-retry-output]');if(retry){e.preventDefault();retryOutput(retry.getAttribute('data-ec-retry-output'));return}var item=e.target.closest('[data-ec-view-output]');if(item)showViewer((state.run.outputs||[]).filter(function(o){return o.status==='succeeded'&&o.url}).findIndex(function(o){return o.id===item.getAttribute('data-ec-view-output')}))});
          one('#ecProvider').onchange=renderModels;one('#ecRequest').oninput=function(){
              var text=(one('#ecRequest').value||'').trim();
@@ -299,7 +365,7 @@
              if(state.outputKind!=='auto'&&detected&&detected!==state.outputKind){state.outputKind='auto';state.detailPlan=null;syncOutputUi();renderModels();renderTemplates();renderTemplatePlan()}
              state.parsedOutput=null;clearTimeout(state.parseTimer);state.parseTimer=setTimeout(parseRequest,350)
          };
-        one('#ecOutputChips').addEventListener('click',function(e){var chip=e.target.closest('[data-ec-output]');if(!chip)return;state.outputKind=chip.getAttribute('data-ec-output')||'auto';state.parsedOutput=null;if(state.outputKind!=='detail')state.detailPlan=null;syncOutputUi();renderModels();parseRequest();renderTemplates();renderTemplatePlan();if(state.outputKind==='detail')previewDefaultDetailTemplate();});
+        one('#ecOutputChips').addEventListener('click',function(e){var chip=e.target.closest('[data-ec-output]');if(!chip)return;state.outputKind=chip.getAttribute('data-ec-output')||'auto';state.parsedOutput=null;if(state.outputKind!=='detail'){state.detailPlan=null;state.intelligentPlan=null}syncOutputUi();renderModels();parseRequest();renderTemplates();if(state.outputKind==='detail'){setDetailMode('intelligent')}else renderTemplatePlan();});
         one('#ecActionChips').addEventListener('click',function(e){var chip=e.target.closest('[data-ec-action]');if(!chip)return;state.action=chip.getAttribute('data-ec-action')||'create';all('.ec-action-chip').forEach(function(item){item.classList.toggle('active',item===chip)});analyzeSelection();});
         one('#ecQuantityChips').addEventListener('click',function(e){
             var chip=e.target.closest('[data-ec-quantity]');if(!chip)return;
@@ -325,6 +391,8 @@
         Promise.all([loadBase(),checkHealth()]).then(function(){return loadHistory(true)}).catch(function(e){var target=one('#ecWarnings');if(target)target.innerHTML='<div class="ec-warning">'+esc(e.message)+'</div>'});
         if(window.lucide)lucide.createIcons();
         window.EcommerceAgentUI={open:open,close:close,refresh:selectedPreview};
+        window.addEventListener('studio-selection-changed',notifySelectionChanged);
+        window.addEventListener('studio-canvas-ready',notifySelectionChanged);
     }
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
 })();

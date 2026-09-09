@@ -163,7 +163,7 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 GLOBAL_LOOP = None
-APP_VERSION = "2026.09.09"
+APP_VERSION = "2026.09.10"
 GITHUB_REPO_URL = "https://github.com/cqiqi271/xiaoqi-ai-canvas"
 GITHUB_VERSION_URL = "https://raw.githubusercontent.com/cqiqi271/xiaoqi-ai-canvas/main/VERSION"
 GITHUB_TREE_URL = "https://api.github.com/repos/cqiqi271/xiaoqi-ai-canvas/git/trees/main?recursive=1"
@@ -20383,6 +20383,69 @@ def ecommerce_estimate_cost(provider_id: str, model: str, count: int, kind: str 
         return None
 
 
+async def ecommerce_plan_chat(*, prompt: str, snapshot: List[Dict[str, Any]],
+                              provider_id: str = "", model: str = "") -> str:
+    """Run the Agent's planning pass through an existing configured chat/vision API.
+
+    This is deliberately separate from image generation: it uses the same provider
+    settings, never edits them, and raises on failure so the ecommerce module can
+    fall back to its offline planner without submitting a paid image task.
+    """
+    provider = get_api_provider(provider_id or get_primary_provider_id())
+    if not provider:
+        raise RuntimeError("没有可用的聊天 API")
+    chat_models = [str(item or "").strip() for item in (provider.get("chat_models") or []) if str(item or "").strip()]
+    if not chat_models:
+        # 生图 API 和聊天/视觉 API 经常是分开配置的。优先沿用当前平台，
+        # 当前平台没有聊天模型时，再从用户已有配置中找一个可用的聊天平台。
+        candidates = [item for item in load_api_providers()
+                      if item.get("enabled", True) and item.get("chat_models")
+                      and provider_env_key_value(item.get("id") or "")]
+        provider = next((item for item in candidates if item.get("primary")), None) or (candidates[0] if candidates else None)
+        if not provider:
+            raise RuntimeError("当前没有配置聊天/视觉模型，已改用本地智能规划")
+        chat_models = [str(item or "").strip() for item in (provider.get("chat_models") or []) if str(item or "").strip()]
+        if not chat_models:
+            raise RuntimeError("当前没有可用的聊天/视觉模型，已改用本地智能规划")
+    chat_model = model if model in chat_models else preferred_chat_model(provider)
+    base, headers, resolved_model = resolve_chat_provider(provider.get("id") or provider_id, chat_model, "")
+    parts: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
+    image_count = 0
+    for node in snapshot:
+        for raw_url in _ecommerce_module._node_images(node)[:3]:
+            if image_count >= 6:
+                break
+            ref_url = media_reference_to_url(raw_url, max_image_size=1024)
+            if not ref_url:
+                continue
+            parts.append({"type": "image_url", "image_url": {"url": ref_url}})
+            image_count += 1
+        if image_count >= 6:
+            break
+    text_parts = [str(_ecommerce_module._node_text(node) or "").strip() for node in snapshot]
+    text_parts = [item for item in text_parts if item]
+    if text_parts:
+        parts.append({"type": "text", "text": "选中的文字资料：" + "\n".join(text_parts[:20])[:5000]})
+    request_body: Dict[str, Any] = {
+        "model": resolved_model,
+        "messages": [
+            {"role": "system", "content": "你是一个严谨的电商商品视觉策划器，只输出用户要求的 JSON，不要编造商品事实。"},
+            {"role": "user", "content": parts},
+        ],
+        "temperature": 0.35,
+    }
+    if is_apimart_provider(provider):
+        request_body["stream"] = False
+    async with httpx.AsyncClient(timeout=min(AI_REQUEST_TIMEOUT, 180)) as client:
+        response = await client.post(f"{base}/chat/completions", headers=headers, json=request_body)
+        response.raise_for_status()
+        raw = response.json()
+    text = text_from_chat_response(raw).strip()
+    if not text:
+        raise RuntimeError("智能规划模型返回了空内容")
+    return text
+
+
 ECOMMERCE_AGENT = register_ecommerce_agent(
     app,
     base_dir=BASE_DIR,
@@ -20392,6 +20455,7 @@ ECOMMERCE_AGENT = register_ecommerce_agent(
     public_providers=public_api_providers,
     estimate_cost=ecommerce_estimate_cost,
     submit_video_task=ecommerce_submit_video_task,
+    plan_chat=ecommerce_plan_chat,
 )
 
 if __name__ == "__main__":
