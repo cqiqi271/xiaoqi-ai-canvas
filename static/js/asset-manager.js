@@ -2562,9 +2562,14 @@ async function uploadWorkflowFiles(files){
 }
 function downloadUrl(url, filename='download'){
     if(!url) return;
+    const raw = String(url || '');
+    const safeName = assetDownloadName({url:raw, name:filename, kind:'image'});
+    const href = raw.startsWith('/api/download-output')
+        ? raw
+        : `/api/download-output?url=${encodeURIComponent(raw)}&name=${encodeURIComponent(safeName)}`;
     const link = document.createElement('a');
-    link.href = url;
-    link.download = filename || '';
+    link.href = href;
+    link.download = safeName || '';
     link.target = '_blank';
     document.body.appendChild(link);
     link.click();
@@ -2660,8 +2665,12 @@ function assetDownloadName(item){
     let name = String(item?.name || 'asset');
     const urlPath = String(item?.url || '').split('?')[0];
     const dot = urlPath.lastIndexOf('.');
-    const ext = dot > urlPath.lastIndexOf('/') ? urlPath.slice(dot) : '';
-    if(ext && !name.toLowerCase().endsWith(ext.toLowerCase())) name += ext;
+    const urlExt = dot > urlPath.lastIndexOf('/') ? urlPath.slice(dot).toLowerCase() : '';
+    const kind = String(item?.kind || item?.media_kind || item?.mediaKind || '').toLowerCase();
+    const ext = /\.(png|jpe?g|webp|gif|bmp|tiff?|avif)$/i.test(urlExt) ? urlExt : (kind === 'video' ? '.mp4' : kind === 'audio' ? '.mp3' : '.png');
+    const current = name.match(/\.[a-z0-9]{2,8}$/i)?.[0]?.toLowerCase() || '';
+    if(current && current !== ext) name = name.slice(0, -current.length);
+    if(!name.toLowerCase().endsWith(ext)) name += ext;
     return name;
 }
 function downloadAssetItem(id){

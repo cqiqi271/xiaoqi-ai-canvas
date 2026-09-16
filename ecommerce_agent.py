@@ -177,6 +177,17 @@ class AnalyzePayload(BaseModel):
     action: str = "create"
 
 
+class ChatPayload(BaseModel):
+    canvas_id: str = ""
+    message: str = ""
+    messages: List[Dict[str, Any]] = []
+    input_snapshot: List[Dict[str, Any]] = []
+    product_profile: Dict[str, Any] = {}
+    provider_id: str = ""
+    model: str = ""
+    reset: bool = False
+
+
 class DetailPlanPayload(BaseModel):
     input_snapshot: List[Dict[str, Any]] = []
     request_text: str = ""
@@ -386,6 +397,141 @@ def _agent_analysis(snapshot, request_text="", action="create"):
         "warnings": warnings,
         "ready": bool(images),
     }
+
+
+def _chat_product_profile(snapshot, existing=None):
+    base = _product([item for item in snapshot if isinstance(item, dict)])
+    profile = {
+        **base,
+        "color": "",
+        "style": "",
+        "material_visual": "",
+        "details": [],
+        "selling_points": [],
+        "inferred_claims": [],
+        "uncertainties": list(base.get("uncertainties") or []),
+    }
+    if isinstance(existing, dict):
+        for key, value in existing.items():
+            if value not in (None, "", []):
+                profile[key] = value
+    profile["reference_images"] = list(dict.fromkeys(
+        str(item).strip() for item in profile.get("reference_images") or [] if str(item).strip()
+    ))[:20]
+    profile["source_image_count"] = len(profile["reference_images"])
+    return profile
+
+
+def _chat_prompt(snapshot, messages, request_text, profile):
+    conversation = []
+    for item in (messages or [])[-16:]:
+        if not isinstance(item, dict):
+            continue
+        role = "用户" if item.get("role") == "user" else "助手"
+        content = str(item.get("content") or "").strip()
+        if content:
+            conversation.append(f"{role}：{content[:1200]}")
+    image_count = len(list(dict.fromkeys(url for node in snapshot for url in _node_images(node))))
+    return f"""你是“小七AI画布”的 AI 商品设计助手。你现在处于聊天阶段，先分析和理解商品，再决定下一步，不能看到图片就直接开始生图。
+
+用户本次说：{str(request_text or '').strip()[:3000]}
+当前选中的商品图片数量：{image_count}
+当前已保存的商品档案：{json.dumps(profile, ensure_ascii=False)[:5000]}
+之前的对话：{json.dumps(conversation, ensure_ascii=False)[:7000]}
+
+请结合当前选中的商品图片和文字，尽量判断：商品是什么、颜色、款式、面料或材质的视觉感受、产品细节、可以突出哪些卖点。
+只能把图片或文字中能够确认的内容写入 known_facts；不确定的内容放入 uncertainties；不要编造参数、功效、品牌、尺码或配件。
+如果用户只是要求分析，回复分析结果，并告诉用户下一步可以做什么。若用户说“换背景”，明确说明会保留商品款式、颜色、结构和Logo。
+用自然、简洁、像 ChatGPT 一样的中文回复，不要直接调用生图任务。
+
+    优先返回下面格式的 JSON，不要 Markdown；如果当前模型无法严格返回 JSON，就直接返回自然、简洁的中文回复，后端会正常显示：
+{{
+  "reply": "给用户看的自然中文回复",
+  "product_profile": {{
+    "name": "",
+    "category": "",
+    "color": "",
+    "style": "",
+    "material_visual": "",
+    "known_facts": [],
+    "details": [],
+    "selling_points": [],
+    "inferred_claims": [],
+    "uncertainties": [],
+    "protected_elements": []
+  }}
+}}"""
+
+
+def _chat_fallback_reply(message, profile, analysis, messages=None):
+    """Keep the assistant conversational when a remote chat model is unavailable.
+
+    This fallback is intentionally honest: it must not pretend to understand
+    pixels locally and it must never submit a paid image task by itself.
+    """
+    text = str(message or "").strip()
+    history_text = " ".join(
+        str(item.get("content") or "").strip()
+        for item in (messages or []) if isinstance(item, dict)
+    )
+    remembered_background_only = ("只修改背景" in history_text or
+                                  ("只" in history_text and "背景" in history_text and "不要" in history_text))
+    normalized = text.lower()
+    images = int(analysis.get("image_count") or 0)
+    name = str(profile.get("name") or "当前商品").strip()
+    category = str(profile.get("category") or "待确认").strip()
+    facts = [str(item).strip() for item in profile.get("known_facts") or [] if str(item).strip()]
+    protected = "商品款式、颜色、结构、Logo 和原有文字"
+
+    if any(word in normalized for word in ("你好", "您好", "嗨", "hello", "hi", "在吗")):
+        return (
+            "你好，我是小七AI画布里的 AI 商品设计助手。\n\n"
+            "我可以先和你聊天了解商品，再分析你选中的商品图，帮你规划商品套图、详情页和背景修改方案。"
+            "确认方案后，你再点“开始生成”，我才会调用生图接口，不会因为聊天自动扣生图费用。"
+        )
+    if any(word in normalized for word in ("你能做什么", "能做什么", "怎么用", "有什么功能", "介绍一下")):
+        return (
+            "我可以做这几件事：\n"
+            "1. 读取当前选中的商品图片和文字资料。\n"
+            "2. 分析商品类型、颜色、款式、材质视觉、细节和卖点。\n"
+            "3. 先规划一套主图或详情页，再等你确认。\n"
+            "4. 记住当前商品和之前的对话，例如你说“只修改背景”，后面我会继续遵守。\n"
+            "5. 生成完成后把结果放回当前画布。\n\n"
+            "你可以直接上传商品图，或者在中间画布选中商品图，然后告诉我想做什么。"
+        )
+    if "只修改背景" in text or ("只" in text and "背景" in text and "不要" in text):
+        return (
+            f"记住了：这次只修改背景。后续生成时我会保留{protected}，不主动重画商品主体。"
+            "你可以继续告诉我想要的背景，例如“换成干净的白色电商背景”。"
+        )
+    if remembered_background_only and "背景" in text and any(word in text for word in ("换", "改", "替换", "变成")):
+        return (
+            f"记得你刚才说过只修改背景，我会继续保留{protected}。"
+            "这次只把背景换成你说的样式，先记录修改要求，等你点击“开始生成”后才调用生图接口。"
+        )
+    if "背景" in text and any(word in text for word in ("换", "改", "替换", "变成")):
+        return (
+            f"可以，我会按“只修改背景”处理，尽量保留{protected}。"
+            "目前先记录这个修改要求，等你点击“开始生成”后才会调用生图接口。"
+        )
+    if not images:
+        return (
+            "可以，我们先聊天确定方案，不一定要马上上传图片。"
+            "你可以告诉我商品是什么、想做主图还是详情页、准备生成几张；"
+            "需要分析商品外观时，再上传商品图或在画布中选中它即可。"
+        )
+    if category == "待结合图片确认":
+        return (
+            "我已经收到这张商品图，也把它同步到了当前画布。"
+            "当前聊天模型没有返回可用的图片分析结果，所以我不会假装判断商品细节，也不会直接开始生成。"
+            "你仍然可以继续和我聊天；配置支持视觉输入的聊天模型后，再说“分析这张商品图”即可。"
+        )
+    fact_text = "、".join(facts[:4]) or "暂时没有文字参数"
+    return (
+        f"我先把{name}的商品档案记下来了。\n\n"
+        f"目前记录到：类别是{category}；已知资料：{fact_text}。\n"
+        "接下来我可以先规划商品套图，再按你的确认开始生成。"
+    )
 
 
 def _detail_template(template_id):
@@ -731,8 +877,8 @@ def register_ecommerce_agent(app, *, base_dir, submit_image_task, get_image_task
 
     root = choose_state_root()
     brand_dir, product_dir = root / "brands", root / "products"
-    run_dir, export_dir = root / "runs", root / "exports"
-    for path in (brand_dir, product_dir, run_dir, export_dir):
+    run_dir, export_dir, chat_dir = root / "runs", root / "exports", root / "chats"
+    for path in (brand_dir, product_dir, run_dir, export_dir, chat_dir):
         path.mkdir(parents=True, exist_ok=True)
     lock, workers, run_locks = RLock(), {}, {}
 
@@ -756,6 +902,27 @@ def register_ecommerce_agent(app, *, base_dir, submit_image_task, get_image_task
 
     def run_path(run_id):
         return run_dir / f"{safe_id(run_id)}.json"
+
+    def chat_path(canvas_id):
+        return chat_dir / f"{safe_id(canvas_id or 'default')}.json"
+
+    def load_chat(canvas_id):
+        row = read(chat_path(canvas_id), {})
+        if not isinstance(row, dict):
+            row = {}
+        messages = row.get("messages") if isinstance(row.get("messages"), list) else []
+        profile = row.get("product_profile") if isinstance(row.get("product_profile"), dict) else {}
+        return {
+            "canvas_id": str(canvas_id or "default"),
+            "messages": messages[-80:],
+            "product_profile": profile,
+            "updated_at": row.get("updated_at") or 0,
+        }
+
+    def save_chat(row):
+        row["updated_at"] = time.time()
+        atomic(chat_path(row.get("canvas_id") or "default"), row)
+        return row
 
     def load_run(run_id):
         run = read(run_path(run_id))
@@ -1058,6 +1225,106 @@ def register_ecommerce_agent(app, *, base_dir, submit_image_task, get_image_task
     @app.post("/api/ecommerce-agent/analyze")
     async def analyze_api(payload: AnalyzePayload):
         return {"analysis": _agent_analysis(payload.input_snapshot, payload.request_text, payload.action)}
+
+    @app.get("/api/ecommerce-agent/chat")
+    async def chat_get_api(canvas_id: str = ""):
+        """Load only the Agent conversation for one canvas.
+
+        Chat state is isolated below data/ecommerce/chats and never rewrites a
+        canvas file, API settings, generated assets, or history.json.
+        """
+        row = load_chat(canvas_id or "default")
+        return {
+            "canvas_id": row["canvas_id"],
+            "messages": row["messages"],
+            "product_profile": row["product_profile"],
+            "updated_at": row["updated_at"],
+        }
+
+    @app.post("/api/ecommerce-agent/chat")
+    async def chat_post_api(payload: ChatPayload):
+        canvas_id = str(payload.canvas_id or "default").strip() or "default"
+        if payload.reset:
+            row = save_chat({"canvas_id": canvas_id, "messages": [], "product_profile": {}})
+            return {
+                "canvas_id": canvas_id, "reply": "", "messages": [],
+                "product_profile": {}, "analysis": _agent_analysis([]),
+                "source": "local", "updated_at": row["updated_at"],
+            }
+        stored = load_chat(canvas_id)
+        incoming = payload.messages if isinstance(payload.messages, list) else []
+        messages = incoming[-80:] if incoming else stored["messages"][-80:]
+        message = str(payload.message or "").strip()
+        snapshot = [item for item in (payload.input_snapshot or []) if isinstance(item, dict)]
+        profile_seed = payload.product_profile if isinstance(payload.product_profile, dict) and payload.product_profile else stored["product_profile"]
+        profile = _chat_product_profile(snapshot, profile_seed)
+        if not message:
+            return {
+                "canvas_id": canvas_id, "reply": "", "messages": messages,
+                "product_profile": profile, "analysis": _agent_analysis(snapshot),
+                "source": "local",
+            }
+
+        # The frontend normally sends the current user message separately. If
+        # a caller already included it, avoid adding a duplicate transcript row.
+        if not (messages and messages[-1].get("role") == "user"
+                and str(messages[-1].get("content") or "").strip() == message):
+            messages.append({"role": "user", "content": message, "created_at": time.time()})
+
+        reply = ""
+        source = "local"
+        model_profile = {}
+        model_error = ""
+        model_error_type = ""
+        try:
+            if not callable(plan_chat):
+                raise RuntimeError("当前没有配置聊天/视觉模型")
+            raw_text = await plan_chat(
+                prompt=_chat_prompt(snapshot, messages, message, profile),
+                snapshot=snapshot, provider_id=payload.provider_id, model=payload.model,
+            )
+            parsed = _json_from_model_text(raw_text)
+            if isinstance(parsed, dict):
+                reply = str(parsed.get("reply") or "").strip()
+                model_profile = parsed.get("product_profile") if isinstance(parsed.get("product_profile"), dict) else {}
+            else:
+                # Some usable chat models ignore the JSON preference and answer
+                # in normal Chinese. That is still a valid assistant response.
+                reply = str(raw_text or "").strip()
+            if not reply:
+                raise RuntimeError("聊天模型没有返回可显示的回复")
+            source = "model"
+        except Exception as error:
+            model_error = str(error or "聊天模型请求失败").strip()
+            lowered = model_error.lower()
+            if any(word in lowered for word in ("timeout", "timed out", "连接", "network", "connect", "http", "503", "502", "504")):
+                model_error_type = "network"
+            elif any(word in lowered for word in ("key", "配置", "没有可用", "未配置")):
+                model_error_type = "configuration"
+            else:
+                model_error_type = "model"
+            reply = _chat_fallback_reply(message, profile, _agent_analysis(snapshot, message, "create"), messages)
+
+        if model_profile:
+            # Keep runtime-only image references and protected defaults while
+            # accepting the model's new, explainable product observations.
+            profile = _chat_product_profile(snapshot, {**profile, **model_profile})
+        messages.append({"role": "assistant", "content": reply, "created_at": time.time(), "source": source})
+        row = save_chat({
+            "canvas_id": canvas_id,
+            "messages": messages[-80:],
+            "product_profile": profile,
+        })
+        return {
+            "canvas_id": canvas_id,
+            "reply": reply,
+            "messages": row["messages"],
+            "product_profile": profile,
+            "analysis": _agent_analysis(snapshot, message, "create"),
+            "source": source,
+            "model_error": model_error or None,
+            "model_error_type": model_error_type or None,
+        }
 
     @app.post("/api/ecommerce-agent/intelligent-plan")
     async def intelligent_plan_api(payload: IntelligentPlanPayload):

@@ -1,6 +1,6 @@
 (function(){
     'use strict';
-    var state={platforms:[],providers:[],brands:[],templates:[],detailPlan:null,intelligentPlan:null,intelligentPlanKey:'',detailMode:'intelligent',selectionSnapshot:[],history:[],run:null,action:'create',outputKind:'detail',quantityMode:'auto',customQuantity:'',parsedOutput:null,timer:0,parseTimer:0,parseSeq:0,analysis:null,viewerIndex:0,viewerSources:[],viewerSourceIndex:0,viewerLoadToken:0,viewerTimer:0,initTimer:0,initAttempts:0,initialized:false};
+    var state={platforms:[],providers:[],brands:[],templates:[],detailPlan:null,intelligentPlan:null,intelligentPlanKey:'',detailMode:'intelligent',selectionSnapshot:[],history:[],run:null,action:'create',outputKind:'detail',quantityMode:'auto',customQuantity:'',parsedOutput:null,timer:0,parseTimer:0,parseSeq:0,analysis:null,viewerIndex:0,viewerSources:[],viewerSourceIndex:0,viewerLoadToken:0,viewerTimer:0,initTimer:0,initAttempts:0,initialized:false,chatMessages:[],chatProfile:{},chatBusy:false,chatLoaded:false,uploadedImages:[],chatProviderId:'',chatModel:''};
     function one(q,r){return (r||document).querySelector(q)}
     function all(q,r){return Array.prototype.slice.call((r||document).querySelectorAll(q))}
     function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
@@ -39,9 +39,11 @@
     function html(){
         return [
         '<div id="ecAgentBackdrop" class="ec-agent-backdrop"></div>',
-        '<aside id="ecAgentPanel" class="ec-agent-panel" aria-label="画布创作 Agent 中心">',
-        '<header class="ec-agent-head"><div class="ec-agent-mark"><i data-lucide="bot"></i></div><div><h2>画布创作 Agent</h2><p>选中素材，用一句话继续创作，结果直接回到画布</p></div><button class="ec-agent-close" id="ecClose" title="关闭"><i data-lucide="x"></i></button></header>',
+        '<aside id="ecAgentPanel" class="ec-agent-panel" aria-label="AI 商品设计助手">',
+        '<header class="ec-agent-head"><div class="ec-agent-mark"><i data-lucide="bot"></i></div><div><h2>AI 商品设计助手</h2><p>像聊天一样描述想法，先分析商品，再决定怎么做</p></div><button class="ec-agent-close" id="ecClose" title="关闭"><i data-lucide="x"></i></button></header>',
         '<div class="ec-agent-scroll">',
+        '<section class="ec-chat-shell"><div class="ec-chat-top"><div><strong>商品设计对话</strong><span>当前商品会跟着这块画布记住</span></div><button type="button" class="ec-chat-new" id="ecChatNew">新对话</button></div><div id="ecChatContext" class="ec-chat-context">正在读取当前选中素材...</div><div id="ecChatMessages" class="ec-chat-messages"></div><div class="ec-chat-quick"><button type="button" data-ec-quick="帮我分析当前商品">分析当前商品</button><button type="button" data-ec-quick="帮我做一套商品套图">做一套商品套图</button><button type="button" data-ec-quick="只修改背景，商品款式、颜色、结构和原有文字都不要改变">只修改背景</button></div><div class="ec-chat-settings"><label class="ec-field"><span>聊天 API</span><select id="ecChatProvider"></select></label><label class="ec-field"><span>聊天模型</span><select id="ecChatModel"></select></label><p id="ecChatHealth" class="ec-chat-health">聊天模型用于对话和商品图片分析，不会自动开始生图。</p></div><div class="ec-chat-composer"><input id="ecChatFile" type="file" accept="image/*" hidden><button type="button" class="ec-chat-attach" id="ecChatAttach" title="上传商品图片"><i data-lucide="paperclip"></i></button><textarea id="ecChatInput" class="ec-chat-input" rows="2" placeholder="例如：帮我把这款商品做成一套淘宝主图"></textarea><button type="button" class="ec-chat-send" id="ecChatSend"><i data-lucide="send"></i><span>发送</span></button></div><div class="ec-chat-hint">先上传或在画布中选中商品图，我会先分析商品，不会直接开始生图。</div><div id="ecChatProfile" class="ec-chat-profile" hidden></div></section>',
+        '<details class="ec-advanced"><summary>展开生成设置与任务详情</summary>',
         '<section class="ec-section"><div class="ec-section-head"><i data-lucide="scan-search"></i><strong>选中素材</strong><span id="ecSelectedCount">0 个节点</span></div><div id="ecHealth" class="ec-health" role="status">正在检查 Agent 服务...</div><div id="ecSelected" class="ec-selected"></div><div class="ec-actions"><button class="ec-btn" id="ecRefreshSelection">刷新选中内容</button><button class="ec-btn" id="ecCreateNode">放入 Agent 节点</button><button class="ec-btn primary" id="ecAnalyze">分析并规划</button></div><p class="ec-hint">Agent 只读取当前选中的图片、文字和参考素材，不会混入画布里的其他内容。</p><div id="ecAnalysis" class="ec-analysis"><div class="ec-empty">点击“分析并规划”，先查看 Agent 准备怎么做。</div></div></section>',
         '<section class="ec-section"><div class="ec-section-head"><i data-lucide="wand-sparkles"></i><strong>创作指令</strong><span>只读取当前选中内容</span></div><div id="ecOutputChips" class="ec-output-chips"><button type="button" class="ec-output-chip" data-ec-output="auto">自动判断</button><button type="button" class="ec-output-chip active" data-ec-output="detail">一套详情页</button><button type="button" class="ec-output-chip" data-ec-output="main">一套商品主图</button><button type="button" class="ec-output-chip" data-ec-output="video">一条商品视频</button></div><div id="ecActionChips" class="ec-action-chips"><button type="button" class="ec-action-chip active" data-ec-action="create">开始创作</button><button type="button" class="ec-action-chip" data-ec-action="variation">生成变体</button><button type="button" class="ec-action-chip" data-ec-action="background">换背景</button><button type="button" class="ec-action-chip" data-ec-action="expand">扩展画面</button><button type="button" class="ec-action-chip" data-ec-action="refine">局部优化</button><button type="button" class="ec-action-chip" data-ec-action="continue">继续创作</button></div><label class="ec-field"><span>用大白话告诉 Agent 想做什么</span><textarea id="ecRequest" placeholder="例如：帮我把这个商品做成一套详情页，突出材质和使用场景">帮我根据选中的商品素材智能生成一套详情页，保持商品外观不变</textarea></label><div class="ec-quantity"><div class="ec-quantity-head"><strong>生成数量</strong><span>可选或自定义，最多 200 张</span></div><div id="ecQuantityChips" class="ec-quantity-chips"><button type="button" class="ec-quantity-chip active" data-ec-quantity="auto">自动规划</button><button type="button" class="ec-quantity-chip" data-ec-quantity="4">4 张</button><button type="button" class="ec-quantity-chip" data-ec-quantity="6">6 张</button><button type="button" class="ec-quantity-chip" data-ec-quantity="9">9 张</button><button type="button" class="ec-quantity-chip" data-ec-quantity="12">12 张</button><button type="button" class="ec-quantity-chip" data-ec-quantity="custom">自定义</button></div><label id="ecCustomQuantityWrap" class="ec-custom-quantity" hidden><span>输入数量</span><input id="ecCustomQuantity" type="number" min="1" max="200" step="1" placeholder="例如 15"><em>手动数量会覆盖提示词里的数量，点“自动规划”恢复自动识别。</em></label></div><div id="ecParseSummary" class="ec-parse-summary"></div><div id="ecWarnings"></div>',
         '<section class="ec-section ec-template-section"><div class="ec-section-head"><i data-lucide="layout-template"></i><strong>详情页规划方式</strong><span>先规划结构，不会扣费</span></div><div id="ecDetailModes" class="ec-detail-modes"><button type="button" class="ec-detail-mode active" data-ec-detail-mode="intelligent">智能规划详情页</button><button type="button" class="ec-detail-mode" data-ec-detail-mode="template">手动选择模板</button></div><div id="ecSmartPlanHint" class="ec-smart-plan-hint">智能模式会先读取选中的商品图片和文字，再按商品特点安排不同模块。没有写数量时，也不会固定套用 6 张。</div><div id="ecTemplates" class="ec-templates" hidden><div class="ec-empty">正在读取模板...</div></div><div id="ecTemplatePlan" class="ec-template-plan"><div class="ec-empty">点击上面的“分析并规划”，Agent 会先生成商品档案和详情页方案。</div></div></section>',
@@ -51,6 +53,7 @@
         '<section class="ec-section"><div class="ec-section-head"><i data-lucide="activity"></i><strong>运行进度</strong><span id="ecRunId">未运行</span></div><div id="ecRunStatus" class="ec-empty">运行后会显示每一步、成功数、失败原因和上游任务编号</div></section>',
         '<section class="ec-section"><div class="ec-section-head"><i data-lucide="images"></i><strong>创作结果</strong><span id="ecResultCount">0 张</span></div><div id="ecResults" class="ec-results"><div class="ec-empty" style="grid-column:1/-1">尚无结果</div></div><div class="ec-actions"><button class="ec-btn" id="ecFactOnly" disabled>仅保留原始文字</button><button class="ec-btn" id="ecViewDetail" disabled>查看详情页</button><button class="ec-btn primary" id="ecExport" disabled>导出创作包</button></div></section>',
         '<section class="ec-section"><div class="ec-section-head"><i data-lucide="circle-dollar-sign"></i><strong>费用统计</strong><span>以实际返回为准</span></div><div class="ec-cost"><div><span>预计费用</span><strong id="ecEstimated">上游未提供</strong></div><div><span>实际扣费</span><strong id="ecActual">上游未提供</strong></div></div><p class="ec-hint">接口未提供费用时显示“上游未提供”，不会猜测或套用本机其他接口的价格。</p></section>',
+        '</details>',
         '</div></aside>'
         ].join('');
     }
@@ -62,6 +65,99 @@
             var url=node.url||(node.images&&node.images[0]&&node.images[0].url)||'';
             return '<div class="ec-selected-item">'+(url?'<img src="'+esc(url)+'" loading="lazy">':'<span>'+esc(node.text||node.title||node.name||node.type||'文字节点')+'</span>')+'</div>';
         }).join(''):'<div class="ec-empty" style="grid-column:1/-1">先在画布中选中图片、文字或参考素材</div>';
+        renderChatContext();
+    }
+    function chatStorageKey(){return 'xiaoqi-agent-chat-'+(canvasId()||'default')}
+    function saveChatLocal(){
+        try{localStorage.setItem(chatStorageKey(),JSON.stringify({messages:state.chatMessages.slice(-80),product_profile:state.chatProfile||{}}))}catch(e){}
+    }
+    function chatText(value){return esc(value).replace(/\r?\n/g,'<br>')}
+    function renderChatContext(){
+        var target=one('#ecChatContext');if(!target)return;
+        var source=agentSource(),images=source.reduce(function(total,node){return total+(node.url?1:(node.images||[]).filter(function(item){return item&&item.url}).length)},0);
+        var profile=state.chatProfile||{},label=profile.name||'尚未建立商品档案',category=profile.category&&profile.category!=='待结合图片确认'?profile.category:'';
+        target.innerHTML='<span class="ec-chat-context-dot"></span><span>当前素材 '+source.length+' 个 · 图片 '+images+' 张</span><b>'+esc(label)+'</b>'+(category?'<em>'+esc(category)+'</em>':'');
+    }
+    function renderChatProfile(){
+        var target=one('#ecChatProfile');if(!target)return;var p=state.chatProfile||{};
+        var fields=[['商品',p.name],['类别',p.category],['颜色',p.color],['款式',p.style],['材质视觉',p.material_visual]]
+            .filter(function(item){return String(item[1]||'').trim()&&item[1]!=='待结合图片确认'});
+        if(!fields.length){target.hidden=true;target.innerHTML='';return}
+        target.hidden=false;target.innerHTML='<div class="ec-chat-profile-title"><i data-lucide="scan"></i><strong>当前商品档案</strong></div><div class="ec-chat-profile-grid">'+fields.map(function(item){return '<span><small>'+esc(item[0])+'</small><b>'+esc(item[1])+'</b></span>'}).join('')+'</div>'+(p.selling_points&&p.selling_points.length?'<div class="ec-chat-profile-points">可突出：'+p.selling_points.slice(0,4).map(esc).join('、')+'</div>':'');if(window.lucide)lucide.createIcons();
+    }
+    function renderChat(){
+        var target=one('#ecChatMessages');if(!target)return;
+        if(!state.chatMessages.length){
+            target.innerHTML='<div class="ec-chat-welcome"><div class="ec-chat-welcome-mark"><i data-lucide="sparkles"></i></div><strong>先让我认识你的商品</strong><p>上传商品图，或在中间画布选中图片。我会先判断商品、颜色、款式、材质和可突出卖点，再和你一起确定套图方案。</p></div>';
+        }else{
+            target.innerHTML=state.chatMessages.map(function(item){var role=item.role==='user'?'user':'assistant';return '<div class="ec-chat-message '+role+'"><div class="ec-chat-avatar">'+(role==='user'?'你':'AI')+'</div><div class="ec-chat-bubble">'+chatText(item.content||'')+(item.source==='model'?'<small class="ec-chat-source">已结合模型分析</small>':'')+'</div></div>'}).join('');
+            target.scrollTop=target.scrollHeight;
+        }
+        renderChatProfile();renderChatContext();
+        var send=one('#ecChatSend'),input=one('#ecChatInput'),attach=one('#ecChatAttach');
+        if(send){send.disabled=state.chatBusy;send.innerHTML=state.chatBusy?'<i data-lucide="loader-circle"></i><span>分析中</span>':'<i data-lucide="send"></i><span>发送</span>'}
+        if(input)input.disabled=state.chatBusy;
+        if(attach)attach.disabled=state.chatBusy;
+        var chatProvider=one('#ecChatProvider'),chatModel=one('#ecChatModel');
+        if(chatProvider)chatProvider.disabled=state.chatBusy;
+        if(chatModel)chatModel.disabled=state.chatBusy;
+        if(window.lucide)lucide.createIcons();
+    }
+    function loadChatHistory(){
+        var local=null;
+        try{local=JSON.parse(localStorage.getItem(chatStorageKey())||'null')}catch(e){local=null}
+        return api('/api/ecommerce-agent/chat?canvas_id='+encodeURIComponent(canvasId())).then(function(data){
+            state.chatMessages=Array.isArray(data.messages)&&data.messages.length?data.messages:(local&&Array.isArray(local.messages)?local.messages:[]);
+            state.chatProfile=(data.product_profile&&Object.keys(data.product_profile).length)?data.product_profile:((local&&local.product_profile)||{});
+            state.chatLoaded=true;saveChatLocal();renderChat();
+        }).catch(function(){
+            state.chatMessages=local&&Array.isArray(local.messages)?local.messages:[];state.chatProfile=local&&local.product_profile||{};state.chatLoaded=true;renderChat();
+        });
+    }
+    function agentSource(){
+        var rows=selected();if(!rows.length)rows=state.selectionSnapshot||[];
+        var result=[],seen={};
+        function add(node){
+            if(!node||typeof node!=='object')return;
+            var images=(node.images||[]).filter(function(item){return item&&item.url}).map(function(item){return {url:item.url,name:item.name||''}});
+            var url=node.url||'';var key=String(url||((images[0]&&images[0].url)||node.id||''));if(!key||seen[key])return;seen[key]=true;
+            result.push({id:node.id||('uploaded-'+result.length),type:node.type||'image',name:node.name||'',title:node.title||'',text:node.text||'',url:url,images:images});
+        }
+        rows.forEach(add);(state.uploadedImages||[]).forEach(function(item){add({id:item.id||'',type:'image',url:item.url,name:item.name||'',images:[item]})});
+        return result;
+    }
+    async function sendChatMessage(raw){
+        var text=String(raw||'').trim();if(!text||state.chatBusy)return;
+        var source=agentSource(),previous=state.chatMessages.slice(-80);
+        state.chatMessages=previous.concat([{role:'user',content:text,created_at:Date.now()/1000}]);state.chatBusy=true;saveChatLocal();renderChat();
+        var input=one('#ecChatInput');if(input)input.value='';
+        try{
+            var data=await api('/api/ecommerce-agent/chat',{method:'POST',body:JSON.stringify({canvas_id:canvasId(),message:text,messages:previous,input_snapshot:source,product_profile:state.chatProfile||{},provider_id:one('#ecChatProvider')&&one('#ecChatProvider').value||state.chatProviderId||'',model:one('#ecChatModel')&&one('#ecChatModel').value||state.chatModel||''})});
+            state.chatMessages=Array.isArray(data.messages)?data.messages:state.chatMessages.concat([{role:'assistant',content:data.reply||'我暂时没有生成回复。'}]);
+            state.chatProfile=data.product_profile||state.chatProfile||{};state.analysis=data.analysis||state.analysis;saveChatLocal();
+            if(data.analysis&&one('#ecAnalysis')){var a=data.analysis;one('#ecAnalysis').innerHTML='<div class="ec-analysis-summary"><span class="ec-chip">素材 <strong>'+Number(a.source_count||0)+'</strong></span><span class="ec-chip">图片 <strong>'+Number(a.image_count||0)+'</strong></span><span class="ec-chip">文字 <strong>'+Number(a.text_count||0)+'</strong></span></div><strong class="ec-analysis-title">聊天分析已同步</strong><ol>'+((a.steps||[]).map(function(step){return '<li>'+esc(step)+'</li>'}).join(''))+'</ol>'}
+        }catch(e){state.chatMessages=state.chatMessages.concat([{role:'assistant',content:'这次分析没有完成：'+e.message+'。你可以检查本地服务和聊天模型配置后重试。'}]);saveChatLocal()}
+        state.chatBusy=false;renderChat();
+    }
+    async function uploadChatFile(file){
+        if(!file||state.chatBusy)return;
+        state.chatBusy=true;renderChat();
+        try{
+            var form=new FormData();form.append('files',file,file.name||'商品图片');
+            var response=await fetch('/api/ai/upload',{method:'POST',body:form});var data=await response.json().catch(function(){return {}});
+            if(!response.ok)throw new Error(data.detail||data.error||'商品图片上传失败');
+            var uploaded=(data.files||[]).find(function(item){return item&&item.url});if(!uploaded)throw new Error('上传成功但没有得到图片地址');
+            state.uploadedImages.push({url:uploaded.url,name:uploaded.name||file.name||'商品图片',kind:'image'});
+            if(bridge()&&bridge().addImageFromUrl)await bridge().addImageFromUrl(uploaded.url,uploaded.name||file.name||'商品图片');
+            selectedPreview();
+        }catch(e){state.chatBusy=false;renderChat();alert(e.message);return}
+        state.chatBusy=false;renderChat();
+        await sendChatMessage('请先分析我刚上传的这张商品图片：判断商品是什么、颜色、款式、材质视觉、产品细节和可以突出的卖点。先分析，不要开始生图。');
+    }
+    function clearChat(){
+        if(state.chatBusy)return;
+        state.chatMessages=[];state.chatProfile={};state.uploadedImages=[];saveChatLocal();renderChat();
+        api('/api/ecommerce-agent/chat',{method:'POST',body:JSON.stringify({canvas_id:canvasId(),reset:true})}).catch(function(){});
     }
     function platformIds(){return ['canvas']}
     function activeOutputKind(){return state.outputKind!=='auto'?state.outputKind:((state.parsedOutput&&state.parsedOutput.kind)||'main')}
@@ -98,6 +194,27 @@
         one('#ecVideoOptions').hidden=!video;
         one('#ecAddText').closest('.ec-check').style.display=video?'none':'';
         all('.ec-output-chip').forEach(function(item){item.classList.toggle('active',item.getAttribute('data-ec-output')===state.outputKind)});
+    }
+    function renderChatModels(){
+        var providerSelect=one('#ecChatProvider'),modelSelect=one('#ecChatModel');
+        if(!providerSelect||!modelSelect)return;
+        var candidates=state.providers.filter(function(item){return (item.chat_models||[]).length});
+        var previous=state.chatProviderId||providerSelect.value||'';
+        var chosen=candidates.find(function(item){return item.id===previous})||candidates.find(function(item){return item.id==='lingjing'&&item.has_key})||candidates.find(function(item){return item.has_key})||candidates[0];
+        state.chatProviderId=chosen&&chosen.id||'';
+        providerSelect.innerHTML=candidates.map(function(p){return '<option value="'+esc(p.id)+'">'+esc(p.name||p.id)+(p.has_key?'':'（未配置 Key）')+'</option>'}).join('')||'<option value="">没有可用聊天 API</option>';
+        if(state.chatProviderId)providerSelect.value=state.chatProviderId;
+        var models=chosen&&chosen.chat_models||[];
+        var previousModel=state.chatModel||modelSelect.value||'';
+        state.chatModel=models.indexOf(previousModel)>=0?previousModel:(models[0]||'');
+        modelSelect.innerHTML=models.map(function(model){return '<option value="'+esc(model)+'">'+esc(model)+'</option>'}).join('')||'<option value="">没有可用聊天模型</option>';
+        if(state.chatModel)modelSelect.value=state.chatModel;
+        var note=one('#ecChatHealth');
+        if(note){
+            if(!candidates.length){note.className='ec-chat-health warn';note.textContent='没有找到聊天模型，请到 API 设置添加聊天模型。';}
+            else if(!chosen.has_key){note.className='ec-chat-health warn';note.textContent='已找到聊天模型，但当前 API 没有配置 Key。';}
+            else{note.className='ec-chat-health';note.textContent='聊天模型已就绪，可用于对话和商品图片分析，不会自动开始生图。';}
+        }
     }
     function renderModels(){
         var kind=activeOutputKind(),key=kind==='video'?'video_models':'image_models';
@@ -162,13 +279,13 @@
         }).catch(function(e){console.warn('基础详情页预览失败',e)});
     }
     function renderBase(){
-        syncOutputUi();syncQuantityUi();syncDetailModeUi();renderModels();
+        syncOutputUi();syncQuantityUi();syncDetailModeUi();renderModels();renderChatModels();
     }
     async function loadBase(){
         var results=await Promise.all([api('/api/ecommerce-agent/platforms'),api('/api/ecommerce-agent/detail-templates')]);
         var data=results[0],templateData=results[1];
         state.platforms=data.platforms||[];
-        state.providers=(data.providers||[]).filter(function(p){return p.enabled!==false&&((p.image_models||[]).length||(p.video_models||[]).length)});
+        state.providers=(data.providers||[]).filter(function(p){return p.enabled!==false&&((p.image_models||[]).length||(p.video_models||[]).length||(p.chat_models||[]).length)});
         state.brands=[];
         state.templates=templateData.templates||[];
         renderBase();renderTemplates();await parseRequest();
@@ -349,17 +466,23 @@
         var box=one('#ecDetailViewer');if(!box){document.body.insertAdjacentHTML('beforeend','<div id="ecDetailViewer" class="ec-detail-viewer" role="dialog" aria-modal="true"><div class="ec-viewer-panel"><button type="button" class="ec-viewer-close" id="ecViewerClose">×</button><div class="ec-viewer-kicker" id="ecViewerKicker">创作结果预览</div><h3 id="ecViewerTitle"></h3><div class="ec-viewer-image-wrap"><div id="ecViewerState" class="ec-viewer-state loading">正在加载图片...</div><img id="ecViewerImage" alt="创作结果"><video id="ecViewerVideo" controls playsinline preload="metadata" style="display:none"></video></div><div class="ec-viewer-meta" id="ecViewerMeta"></div><div class="ec-viewer-actions"><button type="button" class="ec-btn" id="ecViewerPrev">上一项</button><button type="button" class="ec-btn" id="ecViewerNext">下一项</button><a class="ec-btn primary" id="ecViewerDownload" download>下载结果</a></div></div></div>');box=one('#ecDetailViewer');one('#ecViewerClose').onclick=function(){clearTimeout(state.viewerTimer);one('#ecViewerVideo').pause();box.classList.remove('open')};one('#ecViewerPrev').onclick=function(){showViewer(state.viewerIndex-1)};one('#ecViewerNext').onclick=function(){showViewer(state.viewerIndex+1)};box.onclick=function(e){if(e.target===box){clearTimeout(state.viewerTimer);one('#ecViewerVideo').pause();box.classList.remove('open')}}}
         state.viewerIsVideo=o.media_kind==='video'||/\.(mp4|webm|mov|m4v)(?:[?#]|$)/i.test(o.url);one('#ecViewerKicker').textContent=state.viewerIsVideo?'商品视频预览':'详情页/主图预览';one('#ecViewerTitle').textContent=(o.plan&&((o.plan.module_name)||o.plan.purpose))||'创作结果';one('#ecViewerDownload').href=o.url;one('#ecViewerDownload').download=(state.viewerIsVideo?'商品视频-':'创作图片-')+String((o.plan&&o.plan.index)||state.viewerIndex+1).padStart(2,'0')+(state.viewerIsVideo?'.mp4':'.png');one('#ecViewerMeta').textContent='第 '+String((o.plan&&o.plan.index)||state.viewerIndex+1)+(state.viewerIsVideo?' 条':' 张')+' · '+((state.run.template_name)||state.run.output_label||'创作结果')+(o.cost&&o.cost.amount!=null?' · 费用 ¥'+Number(o.cost.amount).toFixed(4):'');state.viewerSources=viewerSources(o.url);state.viewerSourceIndex=0;box.classList.add('open');loadViewerImage();
     }
-    function open(){one('#ecAgentBackdrop').classList.add('open');one('#ecAgentPanel').classList.add('open');selectedPreview();loadHistory(true)}
+    function open(){one('#ecAgentBackdrop').classList.add('open');one('#ecAgentPanel').classList.add('open');selectedPreview();loadChatHistory();loadHistory(true)}
     function close(){one('#ecAgentBackdrop').classList.remove('open');one('#ecAgentPanel').classList.remove('open')}
     function bind(){
         document.addEventListener('click',function(e){if(e.target.closest('[data-ecommerce-agent-open]'))open()});
         one('#ecClose').onclick=close;one('#ecAgentBackdrop').onclick=close;one('#ecRefreshSelection').onclick=function(){selectedPreview();analyzeSelection()};one('#ecCreateNode').onclick=function(){ensureAgent();selectedPreview()};one('#ecAnalyze').onclick=analyzeSelection;
         one('#ecHistory').addEventListener('click',function(e){var item=e.target.closest('[data-ec-history-id]');if(item)chooseHistory(item.getAttribute('data-ec-history-id'))});
+        one('#ecChatSend').addEventListener('click',function(){sendChatMessage(one('#ecChatInput').value)});
+        one('#ecChatInput').addEventListener('keydown',function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChatMessage(this.value)}});
+        one('.ec-chat-quick').addEventListener('click',function(e){var item=e.target.closest('[data-ec-quick]');if(item)sendChatMessage(item.getAttribute('data-ec-quick')||'')});
+        one('#ecChatAttach').addEventListener('click',function(){if(!state.chatBusy)one('#ecChatFile').click()});
+        one('#ecChatFile').addEventListener('change',function(){var file=this.files&&this.files[0];this.value='';if(file)uploadChatFile(file)});
+        one('#ecChatNew').addEventListener('click',clearChat);
         one('#ecTemplates').addEventListener('click',function(e){var item=e.target.closest('[data-ec-template]');if(item)selectTemplate(item.getAttribute('data-ec-template'))});
         one('#ecDetailModes').addEventListener('click',function(e){var mode=e.target.closest('[data-ec-detail-mode]');if(mode)setDetailMode(mode.getAttribute('data-ec-detail-mode'))});
         one('#ecTemplatePlan').addEventListener('click',function(e){var copy=e.target.closest('[data-ec-copy-prompt]');if(copy){var text=copy.getAttribute('data-ec-copy-prompt')||'';if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(function(){copy.textContent='已复制'}).catch(function(){window.prompt('复制下面的提示词：',text)})}else{window.prompt('复制下面的提示词：',text)}return}if(e.target.closest('#ecApplyTemplate')){one('#ecRequest').value='按当前详情页模板生成每个模块，保持商品主体和原有文字不变';state.outputKind='detail';state.detailMode='template';state.parsedOutput=null;syncOutputUi();var id=state.detailPlan&&state.detailPlan.template_id;if(id)selectTemplate(id);else parseRequest();return}if(e.target.closest('#ecApplySmartPlan')){state.outputKind='detail';state.detailMode='intelligent';one('#ecRequest').value=one('#ecRequest').value.trim()||'根据商品素材智能生成一套详情页';state.parsedOutput=null;syncOutputUi();renderIntelligentPlan();parseRequest();}});
         one('#ecResults').addEventListener('click',function(e){var retry=e.target.closest('[data-ec-retry-output]');if(retry){e.preventDefault();retryOutput(retry.getAttribute('data-ec-retry-output'));return}var item=e.target.closest('[data-ec-view-output]');if(item)showViewer((state.run.outputs||[]).filter(function(o){return o.status==='succeeded'&&o.url}).findIndex(function(o){return o.id===item.getAttribute('data-ec-view-output')}))});
-         one('#ecProvider').onchange=renderModels;one('#ecRequest').oninput=function(){
+         one('#ecProvider').onchange=renderModels;one('#ecChatProvider').onchange=function(){state.chatProviderId=this.value;state.chatModel='';renderChatModels()};one('#ecChatModel').onchange=function(){state.chatModel=this.value};one('#ecRequest').oninput=function(){
              var text=(one('#ecRequest').value||'').trim();
              var detected=text.match(/视频|短视频|宣传片|广告片|商品片/)?'video':(text.match(/详情页|详情图|详情页面|详情/)?'detail':(text.match(/主图|白底图|商品图|产品图|电商图|套图/)?'main':''));
              if(state.outputKind!=='auto'&&detected&&detected!==state.outputKind){state.outputKind='auto';state.detailPlan=null;syncOutputUi();renderModels();renderTemplates();renderTemplatePlan()}
@@ -387,10 +510,10 @@
             return;
         }
         state.initialized=true;
-        document.body.insertAdjacentHTML('beforeend',html());bind();selectedPreview();
+        document.body.insertAdjacentHTML('beforeend',html());bind();selectedPreview();renderChat();loadChatHistory();
         Promise.all([loadBase(),checkHealth()]).then(function(){return loadHistory(true)}).catch(function(e){var target=one('#ecWarnings');if(target)target.innerHTML='<div class="ec-warning">'+esc(e.message)+'</div>'});
         if(window.lucide)lucide.createIcons();
-        window.EcommerceAgentUI={open:open,close:close,refresh:selectedPreview};
+        window.EcommerceAgentUI={open:open,close:close,refresh:selectedPreview,send:sendChatMessage};
         window.addEventListener('studio-selection-changed',notifySelectionChanged);
         window.addEventListener('studio-canvas-ready',notifySelectionChanged);
     }

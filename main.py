@@ -163,7 +163,7 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 GLOBAL_LOOP = None
-APP_VERSION = "2026.09.10"
+APP_VERSION = "2026.09.17"
 GITHUB_REPO_URL = "https://github.com/cqiqi271/xiaoqi-ai-canvas"
 GITHUB_VERSION_URL = "https://raw.githubusercontent.com/cqiqi271/xiaoqi-ai-canvas/main/VERSION"
 GITHUB_TREE_URL = "https://api.github.com/repos/cqiqi271/xiaoqi-ai-canvas/git/trees/main?recursive=1"
@@ -216,10 +216,22 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str = None):
 # --- 配置区域 ---
 
 CLIENT_ID = str(uuid.uuid4())
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# In a frozen Windows build, the executable lives beside the external static
+# resources and per-user data. In source mode keep the original project root.
+if getattr(sys, "frozen", False):
+    BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
+    RESOURCE_DIR = getattr(sys, "_MEIPASS", BASE_DIR)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    RESOURCE_DIR = BASE_DIR
 WORKFLOW_DIR = os.path.join(BASE_DIR, "workflows")
 WORKFLOW_PATH = os.path.join(WORKFLOW_DIR, "Z-Image.json")
-STATIC_DIR = os.path.join(BASE_DIR, "static")
+if getattr(sys, "frozen", False):
+    # Keep UI/workflow files inside the EXE extraction area; user data stays
+    # beside the EXE under BASE_DIR.
+    WORKFLOW_DIR = os.path.join(RESOURCE_DIR, "workflows")
+    WORKFLOW_PATH = os.path.join(WORKFLOW_DIR, "Z-Image.json")
+STATIC_DIR = os.path.join(RESOURCE_DIR, "static")
 MODEL_PRICE_CATALOG_FILE = os.path.join(STATIC_DIR, "model-price-catalog.json")
 MODEL_PRICE_CATALOG_CACHE: Dict[str, Any] = {"mtime": None, "data": None}
 STATIC_RUNNINGHUB_DIR = os.path.join(STATIC_DIR, "runninghub")
@@ -8240,6 +8252,129 @@ def filename_from_media_url(url: str, fallback: str = "download.bin") -> str:
     name = os.path.basename(urllib.parse.unquote(path))
     return sanitize_export_filename(name or fallback, fallback)
 
+
+MEDIA_EXTENSION_BY_TYPE = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/bmp": ".bmp",
+    "image/tiff": ".tiff",
+    "video/mp4": ".mp4",
+    "video/webm": ".webm",
+    "video/quicktime": ".mov",
+    "audio/mpeg": ".mp3",
+    "audio/wav": ".wav",
+    "audio/mp4": ".m4a",
+}
+
+
+def detected_media_type(path="", content=b"", hinted_type=""):
+    """Return a trustworthy MIME type for downloaded media.
+
+    File extensions and upstream names are not reliable: several providers
+    return a PNG/WebP body with no extension or with a generic name. Prefer
+    Pillow's file signature detection, then the response MIME type, then the
+    existing extension as a last resort.
+    """
+    hint = str(hinted_type or "").split(";", 1)[0].strip().lower()
+    if path and os.path.isfile(path):
+        try:
+            with Image.open(path) as image:
+                fmt = str(image.format or "").upper()
+            format_types = {
+                "PNG": "image/png", "JPEG": "image/jpeg",
+                "JPG": "image/jpeg", "WEBP": "image/webp",
+                "GIF": "image/gif", "BMP": "image/bmp",
+                "TIFF": "image/tiff",
+            }
+            if fmt in format_types:
+                return format_types[fmt]
+        except Exception:
+            pass
+    if content:
+        try:
+            with Image.open(BytesIO(content)) as image:
+                fmt = str(image.format or "").upper()
+            format_types = {
+                "PNG": "image/png", "JPEG": "image/jpeg",
+                "JPG": "image/jpeg", "WEBP": "image/webp",
+                "GIF": "image/gif", "BMP": "image/bmp",
+                "TIFF": "image/tiff",
+            }
+            if fmt in format_types:
+                return format_types[fmt]
+        except Exception:
+            pass
+    if hint in MEDIA_EXTENSION_BY_TYPE or hint.startswith(("image/", "video/", "audio/")):
+        return hint
+    if path:
+        return content_type_for_path(path)
+    return "application/octet-stream"
+
+
+def detected_media_type_from_header(header=b"", hinted_type=""):
+    """Identify common media formats without buffering the full remote file."""
+    raw = bytes(header or b"")
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if raw.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if raw.startswith(b"RIFF") and raw[8:12] == b"WEBP":
+        return "image/webp"
+    if raw.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if raw.startswith(b"BM"):
+        return "image/bmp"
+    if len(raw) >= 12 and raw[4:8] == b"ftyp":
+        brand = raw[8:12].lower()
+        if brand in {b"avif", b"avis"}:
+            return "image/avif"
+        if brand in {b"isom", b"iso2", b"mp41", b"mp42", b"avc1"}:
+            return "video/mp4"
+    if raw.startswith(b"\x1a\x45\xdf\xa3"):
+        return "video/webm"
+    return str(hinted_type or "application/octet-stream").split(";", 1)[0].strip().lower() or "application/octet-stream"
+
+
+def media_extension_for(path="", content=b"", hinted_type="", fallback=".bin"):
+    media_type = detected_media_type(path, content, hinted_type)
+    if media_type in MEDIA_EXTENSION_BY_TYPE:
+        return MEDIA_EXTENSION_BY_TYPE[media_type]
+    if media_type.startswith("image/"):
+        return ".png"
+    if media_type.startswith("video/"):
+        return ".mp4"
+    if media_type.startswith("audio/"):
+        return ".mp3"
+    return fallback
+
+
+def media_filename(name, fallback, path="", content=b"", hinted_type=""):
+    """Sanitize a download name and make its extension match the body."""
+    safe = sanitize_export_filename(name, fallback)
+    ext = media_extension_for(path, content, hinted_type, "")
+    if not ext:
+        fallback_ext = os.path.splitext(str(fallback or ""))[1].lower()
+        if fallback_ext in {
+            ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff",
+            ".mp4", ".webm", ".mov", ".mp3", ".wav", ".m4a",
+        }:
+            ext = fallback_ext
+    if not ext:
+        return safe
+    stem, current_ext = os.path.splitext(safe)
+    if current_ext.lower() in set(MEDIA_EXTENSION_BY_TYPE.values()) or current_ext.lower() in {
+        ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff",
+        ".mp4", ".webm", ".mov", ".mp3", ".wav", ".m4a",
+    }:
+        safe = stem
+    elif current_ext:
+        # A non-media suffix such as .bin or .txt is not usable for an image.
+        safe = stem
+    return f"{safe}{ext}"
+
 def fetch_remote_media_bytes(url: str, timeout: float = 30.0, max_bytes: int = 200 * 1024 * 1024):
     text = rewrite_runninghub_file_url(str(url or "").strip())
     parsed = urllib.parse.urlparse(text)
@@ -12821,8 +12956,11 @@ def download_output(request: Request, url: str, name: str = "", inline: bool = F
     if not path:
         path = local_media_file_by_basename(filename_from_media_url(url, ""))
     if path:
-        filename = sanitize_export_filename(os.path.basename(name) if name else os.path.basename(path), os.path.basename(path))
-        return FileResponse(path, media_type=content_type_for_path(path), filename=None if inline else filename)
+        actual_type = detected_media_type(path=path)
+        fallback = os.path.basename(path) or "download.bin"
+        requested = os.path.basename(name) if name else fallback
+        filename = media_filename(requested, fallback, path=path, hinted_type=actual_type)
+        return FileResponse(path, media_type=actual_type, filename=None if inline else filename)
     # 远程文件：流式代理，绝不把整段视频/大文件读进内存（否则多个视频同时代理会撑爆内存、拖垮单进程服务）。
     parsed = urllib.parse.urlparse(str(url or "").strip())
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
@@ -12841,7 +12979,17 @@ def download_output(request: Request, url: str, name: str = "", inline: bool = F
         raise HTTPException(status_code=502, detail=f"远程文件下载失败：{exc}")
     content_type = upstream.headers.get("content-type") or "application/octet-stream"
     fallback = filename_from_media_url(url, "download.bin")
-    filename = sanitize_export_filename(os.path.basename(name) if name else fallback, fallback)
+    prefix = b""
+    try:
+        prefix = next(upstream.iter_content(chunk_size=64 * 1024), b"") or b""
+    except Exception:
+        upstream.close()
+        raise HTTPException(status_code=502, detail="远程文件读取失败")
+    detected_type = detected_media_type_from_header(prefix, content_type)
+    filename = media_filename(
+        os.path.basename(name) if name else fallback, fallback,
+        content=prefix, hinted_type=detected_type,
+    )
     disposition = "inline" if inline else "attachment"
     headers = {"Content-Disposition": f"{disposition}; filename*=UTF-8''{urllib.parse.quote(filename)}"}
     for key in ("content-range", "accept-ranges"):
@@ -12851,6 +12999,8 @@ def download_output(request: Request, url: str, name: str = "", inline: bool = F
 
     def stream_remote():
         try:
+            if prefix:
+                yield prefix
             for chunk in upstream.iter_content(chunk_size=256 * 1024):
                 if chunk:
                     yield chunk
@@ -17511,12 +17661,14 @@ async def download_canvas_assets(payload: CanvasAssetDownloadRequest):
             content = None
             content_type = ""
             if path and os.path.isfile(path):
-                base = sanitize_export_filename(requested_name or os.path.basename(path), os.path.basename(path) or f"image-{count + 1}.png")
+                fallback_name = os.path.basename(path) or f"image-{count + 1}.png"
+                base = media_filename(requested_name or fallback_name, fallback_name, path=path)
             else:
                 local_by_name = local_media_file_by_basename(filename_from_media_url(text, ""))
                 if local_by_name and os.path.isfile(local_by_name):
                     path = local_by_name
-                    base = sanitize_export_filename(requested_name or os.path.basename(path), os.path.basename(path) or f"image-{count + 1}.png")
+                    fallback_name = os.path.basename(path) or f"image-{count + 1}.png"
+                    base = media_filename(requested_name or fallback_name, fallback_name, path=path)
                 else:
                     try:
                         remote = fetch_remote_media_bytes(text)
@@ -17525,7 +17677,11 @@ async def download_canvas_assets(payload: CanvasAssetDownloadRequest):
                     if not remote:
                         continue
                     content, content_type = remote
-                    base = sanitize_export_filename(requested_name or filename_from_media_url(text, f"image-{count + 1}.bin"), f"image-{count + 1}.bin")
+                    fallback_name = filename_from_media_url(text, f"image-{count + 1}.bin")
+                    base = media_filename(
+                        requested_name or fallback_name, fallback_name,
+                        content=content, hinted_type=content_type,
+                    )
             name, ext = os.path.splitext(base)
             archive_name = base
             suffix = 2
@@ -20338,13 +20494,18 @@ def run_workflow(name: str, payload: WorkflowRunRequest):
 # 放在主程序末尾注册，确保所依赖的生成与任务函数都已定义。
 import importlib.util as _importlib_util
 
-_ecommerce_module_path = os.path.join(BASE_DIR, "ecommerce_agent.py")
-_ecommerce_spec = _importlib_util.spec_from_file_location("xiaoqi_ecommerce_agent", _ecommerce_module_path)
-if not _ecommerce_spec or not _ecommerce_spec.loader:
-    raise RuntimeError(f"无法加载电商 Agent 模块：{_ecommerce_module_path}")
-_ecommerce_module = _importlib_util.module_from_spec(_ecommerce_spec)
-sys.modules[_ecommerce_spec.name] = _ecommerce_module
-_ecommerce_spec.loader.exec_module(_ecommerce_module)
+if getattr(sys, "frozen", False):
+    # PyInstaller bundles this module into the executable. Do not look for a
+    # source .py file beside the EXE in the shareable build.
+    import ecommerce_agent as _ecommerce_module
+else:
+    _ecommerce_module_path = os.path.join(BASE_DIR, "ecommerce_agent.py")
+    _ecommerce_spec = _importlib_util.spec_from_file_location("xiaoqi_ecommerce_agent", _ecommerce_module_path)
+    if not _ecommerce_spec or not _ecommerce_spec.loader:
+        raise RuntimeError(f"无法加载电商 Agent 模块：{_ecommerce_module_path}")
+    _ecommerce_module = _importlib_util.module_from_spec(_ecommerce_spec)
+    sys.modules[_ecommerce_spec.name] = _ecommerce_module
+    _ecommerce_spec.loader.exec_module(_ecommerce_module)
 register_ecommerce_agent = _ecommerce_module.register_ecommerce_agent
 
 
@@ -20429,7 +20590,7 @@ async def ecommerce_plan_chat(*, prompt: str, snapshot: List[Dict[str, Any]],
     request_body: Dict[str, Any] = {
         "model": resolved_model,
         "messages": [
-            {"role": "system", "content": "你是一个严谨的电商商品视觉策划器，只输出用户要求的 JSON，不要编造商品事实。"},
+            {"role": "system", "content": "你是小七AI画布的 AI 商品设计助手。优先按用户要求返回 JSON；如果无法严格返回 JSON，就直接用自然、简洁的中文聊天回复。不要编造商品事实，不要因为聊天自动开始生图。"},
             {"role": "user", "content": parts},
         ],
         "temperature": 0.35,

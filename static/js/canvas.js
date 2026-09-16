@@ -3509,7 +3509,7 @@ function groupImageItems(group){
         .map((n, index) => ({url:n.url, name:n.name || outputImageName(n.url) || `image-${index + 1}.png`, kind:'image', nodeId:n.id, __index:index}));
 }
 function extensionFromNameOrUrl(name='', url=''){
-    const source = [name, url].map(value => String(value || '').split('?')[0].split('#')[0]).find(value => /\.[a-z0-9]{2,8}$/i.test(value));
+    const source = [name, url].map(value => String(value || '').split('?')[0].split('#')[0]).find(value => /\.(png|jpe?g|webp|gif|bmp|tiff?|avif)$/i.test(value));
     return source?.match(/(\.[a-z0-9]{2,8})$/i)?.[1] || '.png';
 }
 function safeDownloadFileName(name, fallback='image.png'){
@@ -6711,13 +6711,26 @@ function applyClassicEcommerceResults(run){
     render();
     scheduleSave();
 }
+function addClassicEcommerceImageFromUrl(url, name='商品图片'){
+    if(!ensureCanvas() || !String(url || '').trim()) return null;
+    const p = defaultPoint(0, 0);
+    const node = {id:uid('img'), type:'image', x:p.x, y:p.y, url:String(url).trim(), name:name || '商品图片', mediaKind:'image'};
+    nodes.push(node);
+    selected.clear();
+    selected.add(node.id);
+    render();
+    scheduleSave();
+    window.dispatchEvent(new CustomEvent('studio-selection-changed'));
+    return node;
+}
 window.StudioEcommerceBridge = {
     kind:'classic',
     getCanvasId:() => canvas?.id || '',
     getSelectedNodes:ecommerceClassicSelectedNodes,
     ensureAgentNode:ensureClassicEcommerceAgent,
     updateAgentNode:updateClassicEcommerceAgent,
-    applyRunResults:applyClassicEcommerceResults
+    applyRunResults:applyClassicEcommerceResults,
+    addImageFromUrl:addClassicEcommerceImageFromUrl
 };
 function loopCount(node){
     return Math.max(1, Math.min(100, Number(node?.count || 1) || 1));
@@ -13502,9 +13515,9 @@ function deleteConnection(id, event){
     scheduleSave();
 }
 function outputDownloadName(url){
-    const clean = (url || '').split('?')[0];
-    const ext = clean.includes('.') ? clean.split('.').pop() : 'png';
-    return `canvas-output-${Date.now()}.${ext || 'png'}`;
+    const clean = (url || '').split('?')[0].split('#')[0];
+    const match = clean.match(/\.(png|jpe?g|webp|gif|bmp|tiff?|avif)$/i);
+    return `canvas-output-${Date.now()}${match ? `.${match[1].toLowerCase()}` : '.png'}`;
 }
 function outputDragDownloadHref(url, filename='download') {
     const raw = canvasOriginalMediaUrl(url);

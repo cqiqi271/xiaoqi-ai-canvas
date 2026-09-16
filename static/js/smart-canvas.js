@@ -7075,7 +7075,7 @@ function fileNameFromUrl(url=''){
     }
 }
 function extensionForMediaItem(item, fallback='.png'){
-    const source = [item?.name, item?.url].map(value => String(value || '').split('?')[0].split('#')[0]).find(value => /\.[a-z0-9]{2,8}$/i.test(value));
+    const source = [item?.name, item?.url].map(value => String(value || '').split('?')[0].split('#')[0]).find(value => /\.(png|jpe?g|webp|gif|bmp|tiff?|avif)$/i.test(value));
     if(source) return source.match(/(\.[a-z0-9]{2,8})$/i)?.[1] || fallback;
     const kind = mediaKindForItem(item);
     if(kind === 'video') return '.mp4';
@@ -19448,8 +19448,15 @@ function applySmartEcommerceResults(run){
     delete group.w; delete group.h;
     render(); scheduleSave();
 }
+function addSmartEcommerceImageFromUrl(url, name='商品图片'){
+    if(!String(url || '').trim()) return null;
+    const node = appendImagesToSmartNode([{url:String(url).trim(),name:name || '商品图片',kind:'image'}], '', {forceNew:true, point:viewportCenter()});
+    if(node) window.dispatchEvent(new CustomEvent('studio-selection-changed'));
+    return node;
+}
 window.StudioEcommerceBridge={kind:'smart',getCanvasId:() => canvasId || '',getSelectedNodes:ecommerceSmartSelectedNodes,
-    ensureAgentNode:ensureSmartEcommerceAgent,updateAgentNode:updateSmartEcommerceAgent,applyRunResults:applySmartEcommerceResults};
+    ensureAgentNode:ensureSmartEcommerceAgent,updateAgentNode:updateSmartEcommerceAgent,applyRunResults:applySmartEcommerceResults,
+    addImageFromUrl:addSmartEcommerceImageFromUrl};
 window.dispatchEvent(new CustomEvent('studio-canvas-ready'));
 window.StudioCanvasTools = {
     kind:'smart',
