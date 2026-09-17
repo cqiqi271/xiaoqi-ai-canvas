@@ -8001,6 +8001,8 @@ def image_has_alpha(img: Image.Image) -> bool:
     return False
 
 STORAGE_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".avif"}
+# 素材文件名即寻址，不会原地改写，可以放心让浏览器缓存一小时。
+STORAGE_FILE_CACHE_HEADERS = {"Cache-Control": "public, max-age=3600"}
 
 def storage_file_item(kind, root, path):
     rel = os.path.relpath(path, root).replace("\\", "/")
@@ -8072,7 +8074,13 @@ async def get_storage_file(kind: str, rel_path: str):
     path = storage_file_path(kind, rel_path)
     if not path or not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="文件不存在")
-    return FileResponse(path, media_type=content_type_for_path(path))
+    return FileResponse(
+        path,
+        media_type=content_type_for_path(path),
+        # 素材文件按名字寻址且不会被原地改写，给浏览器一段缓存，
+        # 避免每次重绘画布都重新下载整张原图。
+        headers=STORAGE_FILE_CACHE_HEADERS,
+    )
 
 @app.post("/api/storage-files/delete")
 async def delete_storage_files(payload: Dict[str, Any]):
@@ -8105,6 +8113,10 @@ async def get_asset_classification_prompt():
 async def update_asset_classification_prompt(payload: Dict[str, str]):
     prompt = save_asset_classification_prompt((payload or {}).get("prompt") or "")
     return {"prompt": prompt, "custom": True}
+
+# 缩略图缓存文件名里已经带了「原文件路径+mtime+size+宽度」的哈希，
+# 内容永不改变，可以直接给浏览器长缓存：第二次渲染不再发起任何请求。
+MEDIA_PREVIEW_CACHE_HEADERS = {"Cache-Control": "public, max-age=31536000, immutable"}
 
 def media_preview_cache_paths(path: str, width: int):
     stat = os.stat(path)
@@ -8147,17 +8159,63 @@ def generate_video_preview_image(path: str, width: int) -> Image.Image:
         except OSError:
             pass
 
+def build_media_preview_file(path: str, width: int):
+    """同步生成缩略图缓存，返回 (缓存文件路径, media_type)。调用方负责放进线程执行。"""
+    webp_path, png_path = media_preview_cache_paths(path, width)
+    os.makedirs(MEDIA_PREVIEW_DIR, exist_ok=True)
+    if is_video_preview_file(path):
+        img = generate_video_preview_image(path, width)
+    else:
+        with Image.open(path) as source:
+            img = ImageOps.exif_transpose(source)
+            img.thumbnail((width, width), Image.LANCZOS)
+            img = img.convert("RGBA" if image_has_alpha(img) else "RGB")
+    try:
+        img.save(webp_path, format="WEBP", quality=80, method=1)   # method=1 生成更快（缩略图不追求极致压缩）
+        return webp_path, "image/webp"
+    except Exception:
+        img.save(png_path, format="PNG")
+        return png_path, "image/png"
+
+def prewarm_media_preview(path: str, width: int = 512, category: str = "output"):
+    """图片刚落盘时就把缩略图算好，画布首屏直接命中缓存，不用再等一次 PIL”。
+
+    纯后台动作，失败只打日志，绝不影响生成任务本身。
+    """
+    if not path or not os.path.isfile(path):
+        return
+    try:
+        webp_path, png_path = media_preview_cache_paths(path, width)
+        if os.path.exists(webp_path) or os.path.exists(png_path):
+            return
+    except Exception:
+        return
+
+    async def _run():
+        try:
+            await asyncio.to_thread(build_media_preview_file, path, width)
+        except Exception as exc:
+            print(f"缩略图预热失败: {exc}; path={path}", flush=True)
+
+    try:
+        asyncio.create_task(_run())
+    except RuntimeError:
+        # 没有事件循环（同步上下文）时直接放弃预热，不影响主流程
+        pass
+
 @app.get("/api/media-preview")
-async def media_preview(url: str, w: int = 512):
+async def media_preview(url: str, w: int = 512, provider: str = ""):
     url = rewrite_runninghub_file_url(url)
     path = output_file_from_url(url)
     if not path and re.match(r"^https?://", str(url or ""), re.I):
-        # Do not make the first preview wait for a full remote download plus
-        # PIL processing. The browser can display the upstream image while a
-        # background task warms the local cache for subsequent previews.
-        path = cached_remote_image_path(url, "output")
+        # 上游地址：先等一次本地落盘（刚生成完打开画布时图可能还在下载中）。
+        # 命中本地就不用让浏览器跨网去取原图 —— 这是首屏速度的关键。
+        # 只有真的拿不到，才退回 307 让浏览器直连上游（保命兜底，非常态）。
+        path = await ensure_remote_image_cached(
+            url, "output", provider_id=provider, timeout=REMOTE_PREVIEW_WAIT_TIMEOUT
+        ) or None
         if not path:
-            schedule_remote_image_cache(url, "output")
+            schedule_remote_image_cache(url, "output", provider_id=provider)
             return RedirectResponse(url=url, status_code=307)
     if not path or not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="媒体文件不存在")
@@ -8166,30 +8224,14 @@ async def media_preview(url: str, w: int = 512):
     webp_path, png_path = media_preview_cache_paths(path, width)
 
     if os.path.exists(webp_path):
-        return FileResponse(webp_path, media_type="image/webp")
+        return FileResponse(webp_path, media_type="image/webp", headers=MEDIA_PREVIEW_CACHE_HEADERS)
     if os.path.exists(png_path):
-        return FileResponse(png_path, media_type="image/png")
-
-    def _build_preview():
-        # 同步 PIL 处理 + 落盘，放到线程里执行，避免阻塞事件循环（几十张首次生成会卡死整个 loop → 缩略图全空白）
-        os.makedirs(MEDIA_PREVIEW_DIR, exist_ok=True)
-        if is_video_preview_file(path):
-            img = generate_video_preview_image(path, width)
-        else:
-            with Image.open(path) as source:
-                img = ImageOps.exif_transpose(source)
-                img.thumbnail((width, width), Image.LANCZOS)
-                img = img.convert("RGBA" if image_has_alpha(img) else "RGB")
-        try:
-            img.save(webp_path, format="WEBP", quality=80, method=1)   # method=1 生成更快（缩略图不追求极致压缩）
-            return webp_path, "image/webp"
-        except Exception:
-            img.save(png_path, format="PNG")
-            return png_path, "image/png"
+        return FileResponse(png_path, media_type="image/png", headers=MEDIA_PREVIEW_CACHE_HEADERS)
 
     try:
-        out_path, media_type = await asyncio.to_thread(_build_preview)
-        return FileResponse(out_path, media_type=media_type)
+        # 同步 PIL 处理 + 落盘，放到线程里执行，避免阻塞事件循环（几十张首次生成会卡死整个 loop → 缩略图全空白）
+        out_path, media_type = await asyncio.to_thread(build_media_preview_file, path, width)
+        return FileResponse(out_path, media_type=media_type, headers=MEDIA_PREVIEW_CACHE_HEADERS)
     except Exception as exc:
         raise HTTPException(status_code=415, detail=f"无法生成预览图：{exc}") from exc
 
@@ -8205,7 +8247,7 @@ async def image_jpeg(url: str, w: int = 0):
     key = hashlib.sha1(f"{os.path.abspath(path)}|{stat.st_mtime_ns}|{stat.st_size}|{width}|jpg".encode("utf-8", "ignore")).hexdigest()
     cache_path = os.path.join(MEDIA_PREVIEW_DIR, f"{key}.jpg")
     if os.path.exists(cache_path):
-        return FileResponse(cache_path, media_type="image/jpeg")
+        return FileResponse(cache_path, media_type="image/jpeg", headers=MEDIA_PREVIEW_CACHE_HEADERS)
 
     def _build():
         os.makedirs(MEDIA_PREVIEW_DIR, exist_ok=True)
@@ -8225,7 +8267,7 @@ async def image_jpeg(url: str, w: int = 0):
 
     try:
         out_path = await asyncio.to_thread(_build)
-        return FileResponse(out_path, media_type="image/jpeg")
+        return FileResponse(out_path, media_type="image/jpeg", headers=MEDIA_PREVIEW_CACHE_HEADERS)
     except Exception as exc:
         raise HTTPException(status_code=415, detail=f"无法转换图片：{exc}") from exc
 
@@ -10622,7 +10664,7 @@ async def upload_local_video_to_cloud(ref_url: str, service: str = "auto") -> Di
 async def upload_local_video_to_temp_sh(ref_url: str) -> Dict[str, str]:
     return await upload_local_video_to_cloud(ref_url, "auto")
 
-async def save_ai_image_to_output(image_data, prefix="online_", category="output"):
+async def save_ai_image_to_output(image_data, prefix="online_", category="output", provider=None, provider_id=""):
     filename = f"{prefix}{uuid.uuid4().hex[:10]}.png"
     path = output_path_for(filename, category)
     if image_data["type"] == "b64":
@@ -10635,13 +10677,29 @@ async def save_ai_image_to_output(image_data, prefix="online_", category="output
             path = output_path_for(filename, category)
         with open(path, "wb") as f:
             f.write(base64.b64decode(image_data["value"]))
+        prewarm_media_preview(path)
         return output_url_for(filename, category)
     value = image_data["value"]
     if value.startswith("/output/") or value.startswith("/assets/"):
+        prewarm_media_preview(output_file_from_url(value) or "")
         return value
     value = rewrite_runninghub_file_url(value)
     if re.match(r"^https?://", value, re.I):
-        schedule_remote_image_cache(value, category)
+        # 生成结果必须在任务返回前落到本地，原因是：
+        #   1) 上游（尤其中转网关）给的是临时签名地址或需要 API Key 的地址，
+        #      浏览器直接引用迟早 401/403/404 —— 这正是画布上「生成完就是破图」的根因；
+        #   2) 只有本地文件才能命中 /api/media-preview 的缩略图与 immutable 缓存，
+        #      否则每次渲染都要跨网拉一张 1~3MB 原图，慢在这里。
+        # 超时不会丢图：ensure_remote_image_cached 会让后台继续下载，落地后自动命中。
+        local_path = await ensure_remote_image_cached(
+            value, category,
+            provider=provider, provider_id=provider_id,
+            timeout=REMOTE_IMAGE_DOWNLOAD_TIMEOUT,
+        )
+        if local_path:
+            prewarm_media_preview(local_path)
+            return local_url_from_path(local_path, category)
+        print(f"上游图片本地化失败，先回退远程地址：{value}", flush=True)
     return value
 
 def remote_image_cache_key(url: str) -> str:
@@ -10660,47 +10718,167 @@ def remote_image_extension(url: str, content_type: str = "") -> str:
     ext = os.path.splitext(urllib.parse.urlparse(str(url or "")).path)[1].lower()
     return ext if ext in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif", ".bmp", ".tif", ".tiff"} else ".png"
 
-async def cache_remote_image_to_output(url: str, category: str = "output") -> str:
+# 单张上游图片的下载预算：连接失败要快暴露，读取给足时间；
+# 超过 REMOTE_IMAGE_DOWNLOAD_TIMEOUT 就不再阻塞任务返回，放后台继续下。
+REMOTE_IMAGE_CONNECT_TIMEOUT = 6.0
+REMOTE_IMAGE_DOWNLOAD_TIMEOUT = 30.0
+# /api/media-preview 遇到远程地址时，最多等这么久本地落盘，再退回 307 跳转。
+REMOTE_PREVIEW_WAIT_TIMEOUT = 15.0
+
+def local_url_from_path(path: str, category: str = "output") -> str:
+    """把 assets/<input|output> 下的真实文件路径转成浏览器可访问的 /assets/... 地址。"""
+    folder, _ = output_storage(category)
+    try:
+        rel = os.path.relpath(path, folder).replace("\\", "/")
+    except ValueError:
+        rel = os.path.basename(path)
+    return output_url_for(rel, category)
+
+def registrable_host(host: str) -> str:
+    """取「注册域名」，用于把素材域名对齐到 API 域名。
+
+    实测坑点：中转平台（如小七API/灵境）生图后返回的素材地址往往落在同厂商的另一个
+    子域上，例如 API 是 api.change2pro.com，素材却是 gateway.change2pro.com；
+    API 是 api.tuba.ink，素材却是 img.tuba.ink。只比字符串永远匹配不上，
+    于是下载时带不上 API Key，直接 401/403 —— 这就是画布破图的隐藏原因。
+    """
+    host = str(host or "").lower().split(":")[0].strip().strip(".")
+    if not host:
+        return ""
+    parts = [part for part in host.split(".") if part]
+    if len(parts) <= 2:
+        return ".".join(parts)
+    if len(parts[-1]) == 2 and parts[-2] in {"com", "net", "org", "gov", "edu", "co"}:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:])
+
+def provider_for_media_url(url: str, provider_id: str = ""):
+    """判断某张素材属于哪个 API 平台：显式 provider_id 优先，
+    其次按 base_url 域名精确匹配，最后按注册域名匹配（覆盖子域不同的情况）。"""
+    provider_id = str(provider_id or "").strip().lower()
+    if provider_id:
+        try:
+            return get_api_provider_exact(provider_id)
+        except Exception:
+            return None
+    host = urllib.parse.urlparse(str(url or "")).netloc.lower().split(":")[0]
+    if not host:
+        return None
+    try:
+        providers = load_api_providers()
+    except Exception:
+        return None
+    enabled = [p for p in providers if p.get("enabled", True)]
+    for provider in enabled:
+        base_host = urllib.parse.urlparse(str(provider.get("base_url") or "")).netloc.lower().split(":")[0]
+        if base_host and base_host == host:
+            return provider
+    target_root = registrable_host(host)
+    if not target_root:
+        return None
+    for provider in enabled:
+        base_host = urllib.parse.urlparse(str(provider.get("base_url") or "")).netloc.lower().split(":")[0]
+        if base_host and registrable_host(base_host) == target_root:
+            return provider
+    return None
+
+def remote_image_request_headers(url: str, provider=None) -> Dict[str, str]:
+    """下载上游素材时带上该平台的鉴权头。
+
+    很多中转网关返回的图片地址（形如 https://gateway.xxx.com/vendor/assets/xxx.png）
+    只认 API Key：浏览器直接请求会 401/403，画布上呈现的就是一张破图。
+    所以本地化下载必须复用生成时用的那份凭据。
+    """
+    headers = {
+        "User-Agent": "ComfyUI-API-Modelscope/1.0",
+        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+    }
+    provider = provider or provider_for_media_url(url)
+    if not provider:
+        return headers
+    try:
+        api_key = provider_env_key_value(provider["id"])
+    except Exception:
+        api_key = ""
+    if api_key:
+        headers["Authorization"] = bearer_auth_value(api_key)
+    return headers
+
+def _remove_file_quietly(path: str):
+    try:
+        if path and os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+async def _stream_remote_image_to_file(url: str, headers: Dict[str, str], temp_path: str,
+                                       folder: str, key: str, use_proxy: bool) -> str:
+    timeout = httpx.Timeout(
+        connect=REMOTE_IMAGE_CONNECT_TIMEOUT,
+        read=REMOTE_IMAGE_DOWNLOAD_TIMEOUT,
+        write=30.0,
+        pool=8.0,
+    )
+    client_kwargs: Dict[str, Any] = {"timeout": timeout, "follow_redirects": True}
+    if not use_proxy:
+        client_kwargs["trust_env"] = False
+    try:
+        client = httpx.AsyncClient(**client_kwargs)
+    except TypeError:
+        # 老版本 httpx 不认识 trust_env：退回默认客户端，不让整个下载挂掉
+        client_kwargs.pop("trust_env", None)
+        client = httpx.AsyncClient(**client_kwargs)
+    async with client:
+        async with client.stream("GET", url, headers=headers) as response:
+            response.raise_for_status()
+            content_type = response.headers.get("Content-Type", "")
+            if "text/html" in content_type.lower() or "application/json" in content_type.lower():
+                raise ValueError(f"远程地址不是图片：{content_type}")
+            final_path = os.path.join(folder, f"remote_{key}{remote_image_extension(url, content_type)}")
+            with open(temp_path, "wb") as output:
+                async for chunk in response.aiter_bytes(256 * 1024):
+                    if chunk:
+                        output.write(chunk)
+            if not os.path.exists(temp_path) or os.path.getsize(temp_path) <= 0:
+                raise ValueError("远程图片内容为空")
+            os.replace(temp_path, final_path)
+            return final_path
+
+async def cache_remote_image_to_output(url: str, category: str = "output", provider=None, provider_id: str = "") -> str:
     existing = cached_remote_image_path(url, category)
     if existing:
         return existing
+    provider = provider or provider_for_media_url(url, provider_id)
     folder, _ = output_storage(category)
     os.makedirs(folder, exist_ok=True)
-    timeout = httpx.Timeout(connect=8.0, read=90.0, write=30.0, pool=8.0)
-    temp_path = os.path.join(folder, f"remote_{remote_image_cache_key(url)}.part")
-    try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            async with client.stream("GET", url) as response:
-                response.raise_for_status()
-                content_type = response.headers.get("Content-Type", "")
-                if "text/html" in content_type.lower() or "application/json" in content_type.lower():
-                    raise ValueError(f"远程地址不是图片：{content_type}")
-                final_path = os.path.join(folder, f"remote_{remote_image_cache_key(url)}{remote_image_extension(url, content_type)}")
-                with open(temp_path, "wb") as output:
-                    async for chunk in response.aiter_bytes(256 * 1024):
-                        if chunk:
-                            output.write(chunk)
-                if not os.path.exists(temp_path) or os.path.getsize(temp_path) <= 0:
-                    raise ValueError("远程图片内容为空")
-                os.replace(temp_path, final_path)
-                return final_path
-    finally:
+    headers = remote_image_request_headers(url, provider)
+    key = remote_image_cache_key(url)
+    temp_path = os.path.join(folder, f"remote_{key}.part")
+    last_error: Optional[BaseException] = None
+    # 第一次沿用系统代理；失败后绕开代理直连重试一次。
+    # 国内环境下不少网关域名会被代理规则判成 502/超时，直连反而正常 ——
+    # 这正是「图永远落不了盘 → 画布一直破图」的隐藏原因之一。
+    for use_proxy in (True, False):
         try:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-        except OSError:
-            pass
+            return await _stream_remote_image_to_file(url, headers, temp_path, folder, key, use_proxy)
+        except Exception as exc:
+            last_error = exc
+            if use_proxy:
+                print(f"上游图片下载失败，改直连重试：{exc}; url={url}", flush=True)
+        finally:
+            _remove_file_quietly(temp_path)
+    raise last_error if last_error else RuntimeError("远程图片下载失败")
 
-def schedule_remote_image_cache(url: str, category: str = "output"):
+def schedule_remote_image_cache(url: str, category: str = "output", provider=None, provider_id: str = ""):
     key = f"{category}:{remote_image_cache_key(url)}"
     current = REMOTE_IMAGE_CACHE_TASKS.get(key)
     if current and not current.done():
         return current
     async def _run():
         try:
-            return await cache_remote_image_to_output(url, category)
+            return await cache_remote_image_to_output(url, category, provider=provider, provider_id=provider_id)
         except Exception as exc:
-            print(f"后台保存上游图片失败: {exc}; url={url}")
+            print(f"后台保存上游图片失败: {exc}; url={url}", flush=True)
             return ""
         finally:
             REMOTE_IMAGE_CACHE_TASKS.pop(key, None)
@@ -10708,21 +10886,45 @@ def schedule_remote_image_cache(url: str, category: str = "output"):
     REMOTE_IMAGE_CACHE_TASKS[key] = task
     return task
 
-async def ensure_remote_image_cached(url: str, category: str = "output") -> Optional[str]:
+async def ensure_remote_image_cached(url: str, category: str = "output", provider=None, provider_id: str = "", timeout: float = 0.0) -> Optional[str]:
+    """把上游图片落到本地并返回本地绝对路径。
+
+    timeout > 0 时最多等这么久：超时返回空串，但后台任务用 shield 保住继续下载，
+    下次再请求就是本地命中，不会白等一场。
+    """
     existing = cached_remote_image_path(url, category)
     if existing:
         return existing
-    task = schedule_remote_image_cache(url, category)
-    return await task if task else None
+    task = schedule_remote_image_cache(url, category, provider=provider, provider_id=provider_id)
+    if not task:
+        return None
+    if timeout and timeout > 0:
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), timeout)
+        except asyncio.TimeoutError:
+            return ""
+        except Exception:
+            return ""
+    return await task
 
-def image_output_meta(url, source_item=None):
+def image_output_meta(url, source_item=None, provider_id=""):
     meta = {"url": url, "kind": "image"}
     if not url:
         return meta
     parsed_name = os.path.basename(urllib.parse.urlparse(str(url)).path)
     if parsed_name:
         meta["name"] = parsed_name
+    if provider_id:
+        # 画布持久化这个字段，后续这些图能带着对应平台的鉴权头重新落盘/换机器恢复。
+        meta["provider_id"] = provider_id
     if isinstance(source_item, dict):
+        upstream_url = str(source_item.get("url") or source_item.get("value") or "")
+        # 本地化的上游缓存文件名为 remote_<hash>.<ext>，对用户没有意义，
+        # 展示名仍沿用上游原始文件名（例如 a6feb3db....png）。
+        if re.match(r"^remote_[0-9a-f]{24}\.", parsed_name or "") and re.match(r"^https?://", upstream_url, re.I):
+            upstream_name = filename_from_media_url(upstream_url, "")
+            if upstream_name and upstream_name != "download.bin":
+                meta["name"] = upstream_name
         for key in ("natural_w", "natural_h", "width", "height", "w", "h", "layout_w", "layout_h"):
             try:
                 value = int(float(source_item.get(key) or 0))
@@ -15199,16 +15401,18 @@ async def build_online_image_result(payload: OnlineImageRequest):
         except HTTPException:
             image_items = [image_data]
         # Store batch results concurrently so one slow image cannot delay every
-        # other result. save_ai_image_to_output falls back to the remote URL.
+        # other result. save_ai_image_to_output 会带上平台凭据把上游图片下载到本地，
+        # 只有确实下载失败时才回退远程地址。
         stored_urls = await asyncio.gather(*(
-            save_ai_image_to_output(item, prefix="online_") for item in image_items
+            save_ai_image_to_output(item, prefix="online_", provider=provider, provider_id=provider["id"])
+            for item in image_items
         ))
         local_urls = []
         local_items = []
         for item, local_url in zip(image_items, stored_urls):
             if local_url:
                 local_urls.append(local_url)
-                local_items.append(image_output_meta(local_url, item))
+                local_items.append(image_output_meta(local_url, item, provider_id=provider["id"]))
         return local_urls, local_items, raw_item
     async def generate_batch():
         return await asyncio.gather(*(generate_one() for _ in range(count)))
@@ -15629,14 +15833,15 @@ async def query_image_task(payload: ImageTaskQueryRequest):
         image_items = []
     if image_items:
         stored_urls = await asyncio.gather(*(
-            save_ai_image_to_output(item, prefix="online_") for item in image_items
+            save_ai_image_to_output(item, prefix="online_", provider=provider, provider_id=provider["id"])
+            for item in image_items
         ))
         local_urls = []
         local_items = []
         for item, local_url in zip(image_items, stored_urls):
             if local_url:
                 local_urls.append(local_url)
-                local_items.append(image_output_meta(local_url, item))
+                local_items.append(image_output_meta(local_url, item, provider_id=provider["id"]))
         result = {
             "status": "succeeded",
             "prompt": "",
@@ -17603,6 +17808,66 @@ async def repair_canvas_structure(canvas_id: str):
         "report_before": report,
         "fixed_nodes": fixed_nodes,
         "removed_connections": removed_connections,
+    }
+
+
+@app.post("/api/canvases/{canvas_id}/relocalize-media")
+async def relocalize_canvas_media(canvas_id: str):
+    """把画布里仍指向上游临时地址的图片抓回本地 assets/output，并返回地址映射。
+
+    为什么需要它：早期版本生成完只把上游 URL 存进节点，而中转网关给的地址
+    常常是临时签名或需要 API Key 的 —— 浏览器直接引用迟早 401/403/404，
+    在画布上就是一张永久破图。这个接口负责把历史画布"自愈"回本地文件。
+
+    只做两件事：下载 + 返回 {from: 远程地址, to: 本地地址} 映射；
+    不改写节点、不删任何东西、不落盘画布 —— 由前端按它自己的冲突合并策略保存。
+    """
+    canvas = load_canvas(canvas_id)
+    targets: Dict[str, str] = {}
+    for node in (canvas.get("nodes") or []):
+        if not isinstance(node, dict):
+            continue
+        provider_id = ""
+        run_settings = node.get("runSettings")
+        if isinstance(run_settings, dict):
+            provider_id = str(run_settings.get("provider_id") or run_settings.get("providerId") or "")
+        for img in (node.get("images") or []):
+            if not isinstance(img, dict):
+                continue
+            url = str(img.get("url") or "")
+            if not re.match(r"^https?://", url, re.I):
+                continue
+            item_provider = str(img.get("provider_id") or img.get("providerId") or "")
+            targets.setdefault(url, item_provider or provider_id)
+
+    if not targets:
+        return {"changed": False, "images": [], "failed": [], "total": 0}
+
+    # 同一时间最多 6 张并发下载：够快，也不会把本机网络/内存打满。
+    gate = asyncio.Semaphore(6)
+
+    async def _localize(url: str, provider_id: str):
+        async with gate:
+            try:
+                local_path = await ensure_remote_image_cached(
+                    url, "output", provider_id=provider_id, timeout=REMOTE_IMAGE_DOWNLOAD_TIMEOUT
+                )
+            except Exception as exc:
+                print(f"历史画布图片本地化异常: {exc}; url={url}", flush=True)
+                local_path = ""
+            if not local_path:
+                return None
+            prewarm_media_preview(local_path)
+            return {"from": url, "to": local_url_from_path(local_path, "output")}
+
+    settled = await asyncio.gather(*(_localize(url, pid) for url, pid in targets.items()))
+    images = [item for item in settled if item]
+    failed = [url for url, item in zip(targets.keys(), settled) if not item]
+    return {
+        "changed": bool(images),
+        "images": images,
+        "failed": failed,
+        "total": len(targets),
     }
 
 

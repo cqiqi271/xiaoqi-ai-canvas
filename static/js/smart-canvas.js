@@ -502,11 +502,18 @@ function smartMediaPreviewUrl(itemOrUrl, size=512){
     const displayUrl = displayMediaUrl(displayItem);
     if(!raw || raw.startsWith('data:') || raw.startsWith('blob:')) return displayUrl;
     const isRemote = /^https?:\/\//i.test(raw);
-    const isLocalMedia = raw.startsWith('/output/') || raw.startsWith('/assets/');
+    // /api/storage-files/* 同样是本地素材，必须走缩略图，否则会整张原图下载。
+    const isLocalMedia = raw.startsWith('/output/') || raw.startsWith('/assets/') || raw.startsWith('/api/storage-files/');
     if(!isRemote && !isLocalMedia) return displayUrl;
     if(!isRemote && !/\.(png|jpe?g|webp|gif|bmp|avif|tiff?)(\?|#|$)/i.test(raw)) return displayUrl;
     const width = Math.max(64, Math.min(2048, Math.round(Number(size) || 512)));
-    return `/api/media-preview?w=${width}&url=${encodeURIComponent(raw)}`;
+    // 远程地址带上平台信息：后端据此用对应 API Key 把图抓回本地再出缩略图，
+    // 否则那些需要鉴权的网关地址只会返回 401/403（画布上的破图）。
+    const provider = isRemote && typeof itemOrUrl === 'object' && itemOrUrl
+        ? (itemOrUrl.provider_id || itemOrUrl.providerId || '')
+        : '';
+    const providerQuery = provider ? `&provider=${encodeURIComponent(provider)}` : '';
+    return `/api/media-preview?w=${width}&url=${encodeURIComponent(raw)}${providerQuery}`;
 }
 function smartPreviewImgHtml(itemOrUrl, size=512, attrs=''){
     const original = smartOriginalMediaUrl(itemOrUrl);
@@ -597,7 +604,30 @@ function bindSmartPreviewImageFallbacks(root=document){
                 img.replaceWith(tpl.content.firstElementChild);
                 return;
             }
-            if(original && img.getAttribute('src') !== original) img.src = original;
+            // 第一级兜底：缩略图挂了就直接上原图。
+            if(original && img.getAttribute('src') !== original){ img.src = original; return; }
+            // 第二级兜底：原图也挂了。以前这里会原地留一个破图图标，
+            // 用户完全不知道发生了什么；现在给一个可点击重试的占位，并把重试
+            // 打回 /api/media-preview（后端会顺带把上游图重新抓回本地）。
+            if(img.dataset.brokenPlaceholderBound === '1') return;
+            img.dataset.brokenPlaceholderBound = '1';
+            const placeholder = document.createElement('span');
+            placeholder.className = 'smart-img-broken';
+            placeholder.textContent = '图片加载失败，点击重试';
+            placeholder.style.cssText = 'display:inline-flex;align-items:center;justify-content:center;'
+                + 'min-width:120px;min-height:56px;padding:8px 12px;border:1px dashed currentColor;'
+                + 'border-radius:8px;font-size:12px;opacity:.65;cursor:pointer;text-align:center;';
+            placeholder.addEventListener('click', event => {
+                event.stopPropagation();
+                delete img.dataset.brokenPlaceholderBound;
+                const base = img.dataset.previewSrc || original;
+                placeholder.remove();
+                img.style.visibility = '';
+                if(!base) return;
+                img.src = base + (base.includes('?') ? '&' : '?') + 'retry=' + Date.now();
+            });
+            img.insertAdjacentElement('afterend', placeholder);
+            img.style.visibility = 'hidden';
         });
     });
 }
@@ -6134,6 +6164,36 @@ function migrateSmartGroupImageMembers(){
     });
     return changed;
 }
+let canvasMediaHealInFlight = false;
+// 画布上还留着上游临时地址的图片（老画布常见）：请后端把它们抓回本地、
+// 返回「远程地址 → 本地地址」映射，再由前端改地址并走正常的保存流程。
+// 只在真的存在远程图片时才发请求，且失败静默——绝不阻塞画布打开。
+async function healRemoteCanvasMedia(){
+    if(!canvasId || canvasMediaHealInFlight) return;
+    const hasRemoteImage = nodes.some(node => (node.images || []).some(img => img?.url && /^https?:\/\//i.test(img.url)));
+    if(!hasRemoteImage) return;
+    canvasMediaHealInFlight = true;
+    try {
+        const res = await fetch(`/api/canvases/${encodeURIComponent(canvasId)}/relocalize-media`, {method:'POST'});
+        if(!res.ok) return;
+        const data = await res.json();
+        if(!data?.changed) return;
+        const mapping = new Map((data.images || []).filter(item => item?.from && item?.to).map(item => [item.from, item.to]));
+        if(!mapping.size) return;
+        let changed = false;
+        nodes.forEach(node => {
+            (node.images || []).forEach(img => {
+                const next = mapping.get(img?.url);
+                if(next && next !== img.url){ img.url = next; changed = true; }
+            });
+        });
+        if(changed){ render(); scheduleSave(); }
+    } catch(_) {
+        // 自愈失败不影响使用：显示层已经能通过 /api/media-preview 现场回落。
+    } finally {
+        canvasMediaHealInFlight = false;
+    }
+}
 async function loadCanvas(){
     if(!canvasId) return;
     try {
@@ -6182,6 +6242,7 @@ async function loadCanvas(){
         if(cleanedDetachedInputs || cleanedCompletedState || recoveredLoopOutputs || hiddenCompletedTimers) scheduleSave();
         resumeSmartPendingTasks();
         resumeJimengPendingNodes();
+        healRemoteCanvasMedia();
         startCanvasMetaPoll();
     } catch(e) { toast(tr('smart.toastCanvasFail')); }
 }
@@ -6795,7 +6856,7 @@ function resultMediaUrls(result){
             if(value.url || value.path || value.src || value.uri){
                 const url = value.url || value.path || value.src || value.uri;
                 if(url){
-                    const item = {url, kind:value.kind || value.type || value.mediaKind || '', name:value.name || value.filename || ''};
+                    const item = {url, kind:value.kind || value.type || value.mediaKind || '', name:value.name || value.filename || '', provider_id:value.provider_id || value.providerId || ''};
                     ['natural_w','natural_h','width','height','w','h','layout_w','layout_h'].forEach(key => {
                         const n = Number(value[key]);
                         if(Number.isFinite(n) && n > 0) item[key] = n;
