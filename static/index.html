@@ -1656,8 +1656,8 @@
 
             <button class="update-announcement" type="button" onclick="openUpdateAnnouncementModal()" title="查看更新公告">
                 <div class="update-announcement-label">更新公告</div>
-                <div class="update-announcement-title">小七AI画布 v2026.09.09</div>
-                <div class="update-announcement-text">电商 Agent 支持一句话生成详情页、商品主图和商品视频。</div>
+                <div id="update-announcement-title" class="update-announcement-title">小七AI画布 v2026.09.17.1</div>
+                <div id="update-announcement-text" class="update-announcement-text">修复画布生成的图片显示为破图、加载缓慢的问题。</div>
             </button>
             <div class="author-box">
                 <span class="dx-letter letter-d">D</span>
@@ -1726,17 +1726,19 @@
             <div class="studio-modal-head">
                 <div>
                     <div class="studio-modal-kicker">&#26356;&#26032;&#20844;&#21578;</div>
-                    <h2 id="update-announcement-modal-title" class="studio-modal-title">&#23567;&#19971;AI&#30011;&#24067; v2026.09.09</h2>
+                    <h2 id="update-announcement-modal-title" class="studio-modal-title">小七AI画布 v2026.09.17.1</h2>
                 </div>
                 <button class="studio-modal-close" type="button" onclick="closeUpdateAnnouncementModal()" title="&#20851;&#38381;" aria-label="&#20851;&#38381;">&times;</button>
             </div>
             <div class="studio-modal-body">
                 <p class="studio-modal-copy">&#26412;&#27425;&#26356;&#26032;&#20869;&#23481;&#22914;&#19979;&#65306;</p>
-                <ol class="announcement-list">
-                    <li>&#30005;&#21830; Agent &#25903;&#25345;&#29992;&#19968;&#21477;&#22823;&#30333;&#35805;&#33258;&#21160;&#21028;&#26029;&#24182;&#29983;&#25104;&#35814;&#24773;&#39029;&#12289;&#21830;&#21697;&#20027;&#22270;&#25110;&#21830;&#21697;&#23637;&#31034;&#35270;&#39057;&#12290;</li>
-                    <li>&#35814;&#24773;&#39029;&#27169;&#26495;&#20250;&#33258;&#21160;&#35268;&#21010;&#27169;&#22359;&#65292;&#24182;&#20026;&#27599;&#20010;&#27169;&#22359;&#29983;&#25104;&#23436;&#25972;&#25552;&#31034;&#35789;&#65292;&#25903;&#25345;&#23637;&#24320;&#21644;&#22797;&#21046;&#12290;</li>
-                    <li>&#35270;&#39057;&#20219;&#21153;&#22797;&#29992;&#29616;&#26377;&#35270;&#39057; API &#21644;&#36153;&#29992;&#32479;&#35745;&#65292;&#32467;&#26524;&#21487;&#22312; Agent &#20013;&#39044;&#35272;&#24182;&#22238;&#21040;&#20004;&#31181;&#30011;&#24067;&#12290;</li>
-                    <li>&#20462;&#22797;&#20998;&#20139;&#21253;&#32570;&#23569; Agent &#21518;&#31471;&#30340;&#38382;&#39064;&#65292;&#35299;&#21387;&#21518;&#21363;&#21487;&#20351;&#29992;&#21516;&#19968;&#22871; Agent &#21151;&#33021;&#12290;</li>
+                <ol id="update-announcement-list" class="announcement-list">
+                    <li>修复智能画布生成图片后显示为破图的问题：生成的图片会先保存到本地再显示，不再依赖上游平台的临时图片链接。</li>
+                    <li>大幅提升图片显示速度：画布改用本地缩略图，首屏由约 8 秒降到 0.1 秒内，单张图片体积由约 1.5MB 降到约 22KB。</li>
+                    <li>历史画布中指向上游临时链接的图片，打开画布时会自动下载到本地并替换地址，不再永久打不开。</li>
+                    <li>修复图片需要平台密钥或链接已过期时无法加载的问题，下载图片时会自动带上对应平台的密钥。</li>
+                    <li>修复图片加载失败时只显示一个破图图标、没有任何提示的问题，现在会提示可点击重试。</li>
+                    <li>图片保存到本地后会自动生成缩略图缓存，并为图片请求加上浏览器缓存，重复打开不再重复下载。</li>
                 </ol>
             </div>
             <div class="studio-modal-actions">
@@ -2177,6 +2179,7 @@
         });
 
         function openUpdateAnnouncementModal() {
+            renderUpdateAnnouncement();
             const modal = document.getElementById('update-announcement-modal');
             if(modal) modal.hidden = false;
         }
@@ -2295,6 +2298,45 @@
         function setProjectUpdateNotes(notes) {
             projectUpdateNotes = notes && typeof notes === 'object' ? notes : null;
             renderProjectUpdateNotes();
+            renderUpdateAnnouncement();
+        }
+
+        function updateAnnouncementTexts(notes) {
+            const items = Array.isArray(notes?.items) ? notes.items : [];
+            return items
+                .map(item => (typeof item === 'string' ? item : item?.text) || '')
+                .map(text => String(text).trim())
+                .filter(Boolean);
+        }
+
+        // 「更新公告」原来是把标题和正文都写死在 HTML 里的，每次发版都得手改，很容易漏
+        // （本次漏更新就是这么来的）。现在改成跟随 /api/app-info 返回的更新说明渲染，
+        // 只有取不到数据时才回退到 HTML 里的兜底文案。
+        function renderUpdateAnnouncement() {
+            const notes = projectUpdateNotes || {};
+            const items = updateAnnouncementTexts(notes);
+            const version = String(notes.version || appInfo?.version || '').trim();
+            const isEn = window.StudioI18n?.lang?.() === 'en';
+            if(version) {
+                const label = `${isEn ? 'XiaoQi AI Canvas' : '小七AI画布'} v${version}`;
+                const cardTitle = document.getElementById('update-announcement-title');
+                const modalTitle = document.getElementById('update-announcement-modal-title');
+                if(cardTitle) cardTitle.textContent = label;
+                if(modalTitle) modalTitle.textContent = label;
+            }
+            if(items.length) {
+                const cardText = document.getElementById('update-announcement-text');
+                if(cardText) cardText.textContent = items[0];
+                const list = document.getElementById('update-announcement-list');
+                if(list) {
+                    list.replaceChildren();
+                    items.slice(0, 8).forEach(text => {
+                        const li = document.createElement('li');
+                        li.textContent = text;
+                        list.append(li);
+                    });
+                }
+            }
         }
 
         function renderProjectUpdateNotes() {
